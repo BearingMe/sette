@@ -119,6 +119,27 @@ STAGES = {
                 ('colour', 'tex2d', 80)],
         'uav': [('tokens', 'buffer', 48, 8355840)],
     },
+    # post_3_1: five textures in, three outputs - the 2880x1620 RGBA16F
+    # reconstruction, the 2880x1620 packed 11-11-10 word buffer, and the
+    # 1440x810 half-resolution surface.  The reconstruction surface is written
+    # through an R32_UINT view (two words per pixel) because the captured f16
+    # conversion truncates: the shader reproduces the bytes, not the conversion.
+    #
+    # The comparison floor is declared before the native run and is a floor, not
+    # the claim: the CPU oracle misses one code at the 11-bit/f16 boundary for
+    # ~1e-5 of samples because the reference's own ex2.approx/rcp.approx move a
+    # value that sits exactly on a boundary.  The GPU's own approximations decide
+    # those identically, so the stage then reaches exactness (EXP-016).
+    'post_3_1': {
+        'shader': 'post_cs.cso',
+        'expect': {'identical_min': 0.9999},
+        'srv': [('colour', 'tex2d', 0), ('gate', 'tex2d', 32),
+                ('mix', 'tex2d', 40), ('cov', 'tex2d', 48),
+                ('motion', 'tex2d', 176)],
+        'uav': [('packed', 'buffer', 104, 18662400),
+                ('history', 'tex2d', 96, 'R32_UINT', (5760, 1620)),
+                ('half', 'tex2d', 112)],
+    },
 }
 
 
@@ -283,6 +304,36 @@ def enc0_params(args, fields):
 PARAMS['enc0'] = enc0_params
 
 
+def post_params(args, fields):
+    """post's cbuffer, from the slots its own PTX loads.
+
+    The two sizes differ deliberately: `param+140` (2880x1620) is the
+    reconstruction grid the position maps onto and the packed buffer is sized
+    by, `param+148` (960x540) is the render grid the tile and the colour
+    fallback clamp against.  `param+192` is the motion texture's declared size.
+    """
+    f = lambda o: struct.unpack_from('<f', args, o)[0]
+    i2 = lambda o: list(struct.unpack_from('<2i', args, o))
+    values = {'visible': i2(148), 'recon': i2(140), 'display': i2(192),
+              'colour_origin': i2(8),
+              'scale': [f(124), f(128), f(132), f(136)],
+              'gain': f(120), 'mv_scale': [f(200), f(204)],
+              'mv_offset': [f(208), f(212)], 'reset': args[168]}
+    blob = (struct.pack('<2i', *values['visible'])
+            + struct.pack('<2i', *values['recon'])
+            + struct.pack('<2i', *values['display'])
+            + struct.pack('<2i', *values['colour_origin'])
+            + struct.pack('<4f', *values['scale'])
+            + struct.pack('<f', values['gain'])
+            + struct.pack('<2f', *values['mv_scale'])
+            + struct.pack('<2f', *values['mv_offset'])
+            + struct.pack('<I', values['reset']))
+    return blob, values
+
+
+PARAMS['post_3_1'] = post_params
+
+
 def validate_stage(stage, record):
     """Reject a fixture whose geometry contradicts the stage it claims to be.
 
@@ -370,6 +421,36 @@ def validate_stage(stage, record):
         if groups[0] * threads[0] < tokens:
             problems.append(f'grid {groups} x block {threads} does not cover {tokens} '
                             'tokens')
+    if stage == 'post_3_1':
+        p = record['params']
+        rw, rh = p['recon']
+        vw, vh = p['visible']
+        if b['colour']['geometry'][:2] != [vw, vh]:
+            problems.append(f'the colour texture is {b["colour"]["geometry"][:2]}, '
+                            f'not the render size {[vw, vh]}')
+        for role in ('gate', 'mix', 'cov'):
+            if b[role]['geometry'][:2] != [vw, vh]:
+                problems.append(f'{role} is {b[role]["geometry"][:2]}, not the render '
+                                f'size {[vw, vh]}')
+        if b['packed']['bytes'] != rw * rh * 4:
+            problems.append(f'the packed buffer is {b["packed"]["bytes"]} B, expected '
+                            f'{rw * rh * 4} for {rw}x{rh} words')
+        if b['history']['bytes'] != rw * rh * 8:
+            problems.append(f'the reconstruction surface is {b["history"]["bytes"]} B, '
+                            f'expected {rw * rh * 8} for {rw}x{rh} RGBA16F')
+        if b['half']['bytes'] != (rw // 2) * (rh // 2) * 16:
+            problems.append(f'the half-resolution surface is {b["half"]["bytes"]} B, '
+                            f'expected {(rw // 2) * (rh // 2) * 16}')
+        if p['reset'] != 1:
+            problems.append(f'reset is {p["reset"]}: the native shader implements the '
+                            'reset frame only, where the history sample is the colour '
+                            'texel and the Catmull-Rom path is unreachable')
+        if abs(p['scale'][0] - p['scale'][1]) > 0.0:
+            problems.append(f'the x and y scales differ ({p["scale"][0]}, '
+                            f'{p["scale"][1]}): this stage assumes a square ratio')
+        groups, threads = record['groups'], record['threads']
+        if groups[0] * threads[0] < rw or groups[1] * threads[1] * 2 < rh:
+            problems.append(f'grid {groups} x block {threads} does not cover {rw}x{rh}')
     return problems
 
 
@@ -492,16 +573,20 @@ def export(capture, stage, out, frame):
         image = image_record(directory, image_id)
         reference = image_record(directory, image_id, post=True)
         declared = override or image_format(image)
-        if declared != image_format(image):
+        geometry = entry[4] if len(entry) > 4 else None
+        width = geometry[0] if geometry else image['width']
+        height = geometry[1] if geometry else image['height']
+        if declared != image_format(image) or geometry:
             # an override changes the typed view, never the bytes
-            if image['width'] * image['height'] * 4 != image['bytes']:
-                fail(f'{role}: {declared} needs 4 B per pixel, the capture has '
-                     f'{image["bytes"]} B for {image["width"]}x{image["height"]}')
+            element = 4 if declared.startswith(('R32', 'R10')) else 2
+            if width * height * element != image['bytes']:
+                fail(f'{role}: the typed view {declared} {width}x{height} needs '
+                     f'{width * height * element} B, the capture has {image["bytes"]}')
         open(os.path.join(out, f'ref-{role}.bin'), 'wb').write(reference['data'])
         record['bindings'][role] = {
             'kind': 'image', 'arg': offset, 'image': image_id, 'output': True,
             'format': declared, 'backing_format': hex(image['format']),
-            'geometry': [image['width'], image['height'], image['depth']],
+            'geometry': [width, height, 1],
             'row_bytes': image['row_bytes'], 'bytes': image['bytes'],
             'reference': f'ref-{role}.bin',
             'changed_bytes': int(np.count_nonzero(
@@ -509,7 +594,7 @@ def export(capture, stage, out, frame):
                 != np.frombuffer(reference['data'], np.uint8)))}
         lines.append(f'uav tex2d {len(record["bindings"]) - 1} '
                      f'{record["bindings"][role]["format"]} '
-                     f'{image["width"]} {image["height"]} out-{role}.bin')
+                     f'{width} {height} out-{role}.bin')
 
     problems = validate_stage(stage, record)
     if problems:

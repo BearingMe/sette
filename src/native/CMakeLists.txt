@@ -39,7 +39,8 @@ set(SHADERS
     "image_copy_cs.hlsl|CopyBuf|image_copy_buf.cso"
     "downsample_cs.hlsl|main|downsample_cs.cso"
     "dec0_cs.hlsl|main|dec0_cs.cso"
-    "enc0_cs.hlsl|main|enc0_cs.cso")
+    "enc0_cs.hlsl|main|enc0_cs.cso"
+    "post_cs.hlsl|main|post_cs.cso")
 
 set(SHADER_OUTPUTS)
 foreach(entry IN LISTS SHADERS)
