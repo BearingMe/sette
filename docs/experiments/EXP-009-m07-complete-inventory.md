@@ -232,6 +232,24 @@ at per-token scaling they already dominate the error.
 - [U] Whether the `mvlo` variant's weight blob is byte-identical to `mvhi`'s is
   still untested; only `mvhi` exists in this capture.
 
+## Addendum (2026-10-29): the front-end matrix order is not confirmed
+
+The inventory's *counts*, *codes* and *layer matrices* are unaffected, but two claims above
+depend on a decode of the two front-end weight blobs that has now been tested against an
+independent reference and did not survive it:
+
+- [M] [EXP-013](EXP-013-m05-dec0-epilogue.md) tried to reproduce `dec0`'s four captured
+  surfaces from `front_end_layout('dec0')`'s `[64][128]` decode and the published epilogue.
+  No column of the decoded matrix has the sign, magnitude or spatial pattern the surfaces
+  imply, under either candidate token layout, nor for five other row-major decodings of the
+  same blob. The blob's *size* (8192 + 256 bytes) agrees with the decode; its element order
+  does not.
+- [U] Consequently `dec0`'s activation statistics quoted here (peak 7.56) and `enc0`'s
+  matrix values should be treated as decoded-but-unverified until the order is established.
+  The layer matrices are validated independently by the ten-layer check
+  ([EXP-006](EXP-006-m06-operator-contract.md)), so the INT8 scope comparison - which is
+  dominated by them - stands.
+
 ## Harness note
 
 The hook's `D4R_CUDA_REPLAY_DUMP_LIMIT` defaults to **1 per kernel name**, and

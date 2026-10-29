@@ -242,9 +242,12 @@ Establish a deterministic reference execution path.
   set of 8 captured resources round-trips through D3D12 unchanged, and native `downsample`
   reproduces the captured surface **byte for byte** — 16 588 800 of 16 588 800 bytes,
   0 differing, two runs identical ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
-  Remaining: `dec0`'s four-surface epilogue (B4.3; its matrix stage already matches the
-  published step chain, 97.9% bit-identical), `enc0` (B4.4), `post` (B4.5), the numerical
-  conformance write-up (B4.6), and the shared comparison suite (B4.7, partly in place).
+  Remaining: `dec0`'s four-surface epilogue (B4.3 - **blocked**: the epilogue is transcribed and
+  needs no further reverse engineering, but the expansion matrix's element order cannot be
+  matched to the captured surfaces under any decode tried, so the stage's values are
+  unreproduced; [EXP-013](experiments/EXP-013-m05-dec0-epilogue.md) records the measurements and
+  the next handle), `enc0` (B4.4), `post` (B4.5), the numerical conformance write-up (B4.6), and
+  the shared comparison suite (B4.7, partly in place).
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
