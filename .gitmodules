@@ -1,0 +1,10 @@
+[submodule "references/sources/quattro"]
+	path = references/sources/quattro
+	url = https://github.com/BearingMe/quattro
+[submodule "references/sources/d4r"]
+	path = references/sources/d4r
+	url = https://github.com/countervolts/d4r
+[submodule "references/sources/dlss"]
+	path = references/sources/dlss
+	url = https://github.com/NVIDIA/DLSS.git
+	shallow = true

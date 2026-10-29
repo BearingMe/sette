@@ -8,6 +8,9 @@
 /artifacts/
 /.cache/
 
+# Local proprietary NVIDIA DLSS binary; keep out of Git
+/references/binaries/nvngx_dlss.dll
+
 # Local environment
 .env
 .env.*
