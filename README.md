@@ -33,7 +33,7 @@ Evidence tags follow `docs/CONVENTIONS.md`: `[D]` documentation, `[S]` source ob
 
 **Out of scope:** Other DLSS presets, Ray Reconstruction, Frame Generation, FSR, NGX/DXGI interception, game-specific integration, unrelated GPU architectures, and a generalized ML framework.
 
-The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) is complete. Phase II has started: M05's full-network oracle is blocked because `enc0`/`dec0`/reconstruction weights are not captured, but a real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)). M06–M08 have not started.
+The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) and the Phase II probes M06–M08 are complete. M05's capture is complete at 1920×1080 — every stage group, including the `enc0`/`dec0` weight blobs ([EXP-008](docs/experiments/EXP-008-m05-full-capture.md)) — and its layer-scope oracle replays bit-exactly ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)); the full-network oracle is now a Windows-native reconstruction task rather than a capture gap. M07 has closed the weight side: all 360 matrices (1 553 408 e4m3 values) are extracted and quantized at five scopes ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)). M09 has not started.
 
 ## Trace research workflow
 

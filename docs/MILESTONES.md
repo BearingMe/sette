@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase II: M06-M08 pass, M05 is capture-complete but oracle-blocked. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and real captured weights were quantized to INT8 at four scaling scopes with per-channel winning ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)). Its remaining blocker is an execution path for the full FP16 oracle — d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit — so M05 stays BLOCKED at C11 while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase II: M06-M08 pass, M05 is capture-complete but oracle-blocked. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured weight set was quantized to INT8 at five scaling scopes ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408 values, with per-column 16-row K blocks best (0.0048 RMS) and the activation term now co-dominant. M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)). Its remaining blocker is an execution path for the full FP16 oracle — d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit — so M05 stays BLOCKED at C11 while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -279,20 +279,30 @@ Determine whether Preset M can retain meaningful numerical information under INT
 ### Checkpoints
 
 - [x] C01: Implement a CPU quantization simulator (`scripts/m07_int8_weight_quant.py`).
-- [x] C02: Investigate FP8-to-INT8 weight conversion (exact e4m3 -> f16 -> symmetric INT8 on 312 real matrices).
+- [x] C02: Investigate FP8-to-INT8 weight conversion (exact e4m3 -> f16 -> symmetric INT8 over the complete inventory: 360 matrices / 1 553 408 values).
 - [ ] C03: Test symmetric and asymmetric representations — symmetric only; asymmetric defers to M12.
-- [x] C04: Compare per-tensor, per-channel, and block scaling (per-channel best: 0.0062 RMS vs 0.0094 per-tensor).
-- [x] C05: Investigate activation ranges (peak/RMS 1.95-4.32 across all ten launches).
+- [x] C04: Compare per-tensor, per-output-channel, per-input-channel and per-column K-block scaling (best: 16-row K block at 0.0048 RMS; per-output-channel 0.0062; per-tensor 0.0095).
+- [x] C05: Investigate activation ranges (peak/RMS 1.93-4.19 across the ten layer launches; dec0's operand 7.56).
 - [ ] C06: Test clipping and saturation — max-based scaling only, no clipping sweep.
-- [ ] C07: Measure error propagation through representative blocks — one projection measured (0.0097-0.0133 relative); full block defers to M11.
-- [x] C08: Identify precision-sensitive operations (MLP up-projections and the growing tube activation range).
-- [x] C09: Establish an initial mixed-precision policy (per-output-channel INT8 weights; per-tensor activation scales with M11 re-check; floating-point RMS/softmax/requant; `K <= 131071` accumulator bound).
+- [ ] C07: Measure error propagation through representative blocks — six representative GEMMs measured, activation term separated from weight term; full block defers to M11.
+- [x] C08: Identify precision-sensitive operations (dec0's expansion matrix and operand, and the MLP up-projections).
+- [x] C09: Establish an initial mixed-precision policy (per-output-channel INT8 weights as the single-accumulation baseline, per-column 16-row K blocks where extra rescales fit; per-token activation scale re-checked in M11 where it is now the dominant term; floating-point RMS/softmax/requant; `K <= 131071` accumulator bound).
+
+### Extension checkpoints (task C11-C15)
+
+- [x] A1 (C11): Complete weight extraction — `enc0` and `dec0` decoded through checked layouts, all 360 matrices inventoried with e4m3 codes preserved ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)).
+- [x] A2 (C12): INT8 conversion is deterministic, half-to-even, saturating, zero-preserving, and independently verified ([`tests/test_m07_quantization_contract.py`](../tests/test_m07_quantization_contract.py)).
+- [x] A3 (C13): Five scopes compared on identical data with storage and overhead accounting.
+- [x] A4 (C14): INT8 GEMM error measured on captured activations for six representative matrices, with integer accumulation and separated weight/activation terms; `enc0`'s missing operand recorded rather than substituted.
+- [x] A5 (C15): Every known weight matrix accounted for; remaining unknowns explicit.
 
 ### Validation Gate
 
 Quantization behavior and limitations are characterized with reproducible numerical evidence and independent expectations.
 
-**PASS** — real-weight and real-activation error is measured per scaling scope, with outliers and ranges reported and the surviving schemes identified ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). Asymmetric quantization, clipping sweeps and block-level propagation are explicitly deferred to M11/M12 rather than claimed.
+**PASS** — real-weight and real-activation error is measured per scaling scope, with outliers and ranges reported and the surviving schemes identified ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md), extended to the complete inventory in [EXP-009](experiments/EXP-009-m07-complete-inventory.md)). Asymmetric quantization, clipping sweeps and block-level propagation are explicitly deferred to M11/M12 rather than claimed. EXP-007's matrix counts and its "block16/32" scope definition were found wrong on re-run and are corrected in an addendum there.
+
+**Weight side: closed.** 360/360 matrices extracted, decoded and characterised. Image quality remains an M11/M16 question: this milestone establishes that the information survives INT8, not that the result looks right.
 
 ### Expected Deliverables
 

@@ -119,6 +119,26 @@ that the representation carries the information.
 - [M] Statistics come from one frame (preset 13, 1280x720) of one capture. Weight
   statistics are frame-independent, but activation ranges are not.
 
+## Addendum (2026-10-29): corrected counts and scope definitions
+
+Re-running the study over the complete inventory ([EXP-009](EXP-009-m07-complete-inventory.md))
+exposed two errors in this report that are corrected here rather than rewritten:
+
+1. **Matrix and element counts.** The ten captured layers hold **358 matrices and
+   1 540 096 e4m3 values**, not 312 and 122 880.  The aggregate RMS figures above
+   are element-weighted and reproduce exactly, so the *conclusions* stand, but the
+   counts were wrong and are not used anywhere else.
+2. **Scope definitions.** "block16/block32" above applies **one scale to a whole
+   16/32-row slab across all output columns**.  The scope an INT8 GEMM can consume
+   is one scale per (output column, 16/32-row K block); on the same data that is
+   *better* than per-channel (0.0048 vs 0.0062), the opposite of the ordering
+   recorded above for the slab scope.  [EXP-009](EXP-009-m07-complete-inventory.md)
+   reports the K-blocked scope and the recommendation is updated there.
+
+The verification command for the original numbers is unchanged and still
+reproduces them:
+`python scripts/m07_int8_weight_quant.py <capture>` (now extended).
+
 ## Files
 
 - `scripts/m07_int8_weight_quant.py` (`--json` for machine-readable output)
