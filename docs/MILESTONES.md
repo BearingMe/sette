@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's full-network gate is blocked because the Windows capture hook omits `enc0`/`dec0`/reconstruction weights ([EXP-002](experiments/EXP-002-m05-oracle-blocker.md)), but a real-weight layer oracle is established: ten Preset M layers captured from the pinned DLL replay bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's capture coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)): the Windows hook captures the ten layers, while `enc0`/`dec0` weights and post/downsample tensors remain; C10/C11 are open. A real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the full-network gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -195,7 +195,7 @@ Understand the numerical behavior of the reference implementation.
 
 **Status:** BLOCKED / BLOCKED
 
-**Blocker:** The full-network oracle still needs `enc0`, `dec0`, and reconstruction weights. The Windows ZLUDA capture hook is whitelisted to the ten `rrlite_*_4x4` layer kernels and does not dump those stages, so `compile_m.py` cannot build a complete model from this capture. A layer-level oracle is established: ten real-weight layers were captured from the pinned DLL and replayed bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and the remaining capture options are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Blocker:** A complete model needs `enc0` and `dec0` weight captures, which the Windows ZLUDA replay hook omits; post/downsample tensor capture is needed only for full intermediate validation. The coverage audit classifies every missing group and gives the exact whitelist additions ([finding](../findings/2026-10-29-m05-capture-coverage.md)). A layer-level oracle is established: ten real-weight layers were captured from the pinned DLL and replayed bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and capture options are in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Objective
 
@@ -211,6 +211,9 @@ Establish a deterministic reference execution path.
 - [x] C06: Capture intermediate tensors where accessible (layer inputs, weights, and outputs).
 - [x] C07: Establish repeatability and tolerance requirements (two native replays byte-identical; exact tolerance).
 - [x] C08: Identify nondeterministic behavior, if any (none observed at layer scope).
+- [x] C09: Capture coverage audit: map the M dispatches against the ZLUDA whitelist and classify the missing groups by weights versus tensors ([finding](../findings/2026-10-29-m05-capture-coverage.md)).
+- [ ] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors; rebuild the hook or use the documented probe-side fallback.
+- [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression.
 
 ### Validation Gate
 
@@ -218,7 +221,7 @@ Reference execution is reproducible, and captured outputs are suitable for diffe
 
 **Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
-**Full-network gate: BLOCKED** — `enc0`/`dec0`/reconstruction weights are not captured, so no complete model or full-frame oracle exists. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Full-network gate: BLOCKED** — coverage audit complete ([finding](../findings/2026-10-29-m05-capture-coverage.md)); `enc0`/`dec0` weights remain uncaptured because the Windows ZLUDA whitelist omits those kernels. C10 and C11 are open. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
