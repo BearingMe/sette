@@ -202,6 +202,30 @@ know about it:
 [M] Consequence for B5: `enc0` is no longer an unknown in the native path.  The remaining input
 stage is `post` (B4.5), and the ten-layer net still has to run inside this graph.
 
+## Addendum (2026-10-29, later still again): `post_3_1`'s contract, byte-exact
+
+[S] [EXP-016](../experiments/EXP-016-m05-post-reconstruction.md) derives the reconstruction
+from `dlss-0145-00.ptx` and reproduces **all three** of its outputs byte for byte.  What the
+pipeline needs to know:
+
+- **It is the only stage with three outputs.**  `param+96` is the 2880x1620 RGBA16F
+  reconstruction, `param+104` the 2880x1620 packed 11-11-10 word buffer that `downsample`
+  reads, and `param+112` a 1440x810 half-resolution mean.  The reconstruction is 2880x1620
+  because the render is 960x540 and the ratio is 3: a thread owns a column and a **row pair**.
+- **The inputs are dec0's surfaces.**  post's image 3/4/5 are dec0's gate/mix/covariance by
+  content, so the `dec0 -> post` edge is byte-exact at three of the four surfaces.
+- **Three conversions decide the bytes and none of them is in the PTX.**  The RGBA16F surface
+  truncates toward zero (round-to-nearest agrees on 55.8%, truncation on 99.998%); the
+  half-resolution surface holds 10-bit codes as exact `k/1023` quotients; and the mean is
+  quantised before that store.
+- **The motion texture is sampled at display resolution.**  `trunc(pos/recon*display)` reaches
+  (1919, 1079) while the captured texture is 960x540.  On this frame the texture is zero, so
+  the question stays open - the same one EXP-015's E7 records.
+
+[M] Consequence for B5: every input/output stage is now reconstructed and exact on the
+canonical frame, so the ten-layer net is the only part of the native path that is still an
+unknown.
+
 ## Variant handling (B2/C17)
 
 [S] `scripts/m_weights.py` parses kernel names into explicit fields -

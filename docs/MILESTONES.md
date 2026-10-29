@@ -258,10 +258,16 @@ Establish a deterministic reference execution path.
   identical, and equal to `enc1`'s captured input),
   [EXP-015](experiments/EXP-015-m05-enc0-contract.md). The three errors that had to be
   corrected were the dither's add operand, eight of the 32 feature slots' channels, and the
-  epilogue's channel permutation. Remaining: `post` (B4.5), the numerical conformance
-  write-up (B4.6, now the home of the ULP-level residuals) and the shared comparison suite
-  (B4.7, partly in place). The history branch of
-  `dec0` (frames with `reset = 0`) is not implemented.
+  epilogue's channel permutation. B4.5 (native `post`) is **done**: the reconstruction reads
+  five textures and writes three surfaces, and the native stage reproduces **all three byte
+  for byte** - the 18 662 400-byte packed word buffer, the 37 324 800-byte RGBA16F
+  reconstruction and the 18 662 400-byte half-resolution surface, two runs identical,
+  [EXP-016](experiments/EXP-016-m05-post-reconstruction.md). Two of its three outputs needed a
+  conversion the PTX does not show (the f16 surface truncates; the half-resolution surface is
+  10-bit and holds exact `k/1023`), and the odd row of each thread's row pair keeps the even
+  row's texels. Remaining: the numerical conformance write-up (B4.6, now the home of the
+  ULP-level residuals) and the shared comparison suite (B4.7, partly in place). The history
+  branch of `dec0` (frames with `reset = 0`) and of `post` is not implemented.
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
