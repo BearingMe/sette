@@ -308,15 +308,14 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             float3 mixv = float3(acc0[r][3], acc1[r][0], acc1[r][1]) * inv;
             float3 gatev = float3(acc1[r][2], acc1[r][3], acc2[r][0]) * inv;
 
-            // the display-motion vector: one vector for all three candidates
-            int2 t = int2(int((posx / float(recon.x)) * float(display.x)),
-                          int((posy[r] / float(recon.y)) * float(display.y)));
-            int2 mvAt = int2(clamp(t.x, 0, display.x - 1), clamp(t.y, 0, display.y - 1));
-            float2 mv = Motion.Load(int3(mvAt, 0)) + mvOffset;
-            float qx = Fma(mvScale.x, mv.x, posx);
-            float qy = Fma(mvScale.y, mv.y, posy[r]);
-            bool out_of_range = qx < 0.0f || qy < 0.0f
-                                || qx > float(recon.x) || qy > float(recon.y);
+            // The display-motion fetch is not performed here: with `reset != 0`
+            // the history sample is the colour texel regardless of where the
+            // motion points, so the vector cannot reach any output.  It also
+            // samples `trunc(pos/recon*display)` - up to (1919, 1079) - while the
+            // bound texture is 960x540, so issuing it reads out of bounds and,
+            // on this driver, makes the dispatch non-deterministic (EXP-018 §2).
+            // It must be restored, together with the Catmull-Rom path, when the
+            // history branch is implemented.
 
             // the colour texel at floor(pos), clamped
             int2 near = FoldColour(int2(int(floor(posx)), int(floor(posy[r]))));
@@ -340,9 +339,8 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID)
                 b1 = 1.0f;
             }
 
-            // `reset` (or an off-image history) selects the colour texel; that is
-            // the only path this frame takes, and the fixture rejects reset != 0
-            bool fallbackOnly = out_of_range || reset != 0u;
+            // `reset` selects the colour texel; that is the only path this frame
+            // takes, and the fixture rejects reset != 0
             float3 h1 = fallback;
             float3 h2 = (b2 > 0.0f) ? h1 : float3(0.0f, 0.0f, 0.0f);
             // f525 = b2*h2 (rounded), then fma(b1, h1, f525)

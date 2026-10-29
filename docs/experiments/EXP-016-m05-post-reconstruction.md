@@ -134,6 +134,13 @@ captured 16x16x(180x51) dispatch, three `groupshared` tiles, no WMMA.
 | run 1 vs run 2 | **0 bytes differ** on all three |
 | `m_stage_fixture.py check` | 0 problems, `identical_min = 0.9999` met |
 
+*Correction (EXP-018):* these figures were taken over two runs, which is not
+enough to establish determinism.  A 16-run sample later showed that 4 of 16 runs
+differed, in a single block, at pixels whose display-motion fetch was out of
+bounds; the dead fetch was removed and the stage is now 16/16 identical and exact.
+The identity claims above are unchanged, the determinism claim is now backed by
+the regression gate's two-runs-per-stage check.
+
 The GPU is *more* exact than the CPU oracle because its `ex2.approx` and
 `rcp.approx` are the same hardware operations NVIDIA's kernel used; the 108
 knife-edge values the oracle cannot decide are decided identically by the GPU.
