@@ -1,0 +1,38 @@
+
+# Generated research artifacts
+/build/
+/dist/
+/out/
+/tmp/
+/temp/
+/artifacts/
+/.cache/
+
+# Local environment
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Python caches
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
+
+# Compiled intermediates
+*.o
+*.obj
+*.pdb
+*.ilk
+*.class
