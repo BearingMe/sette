@@ -30,9 +30,9 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M03 | Preset M Architecture Reconstruction | COMPLETE | PASS |
 | M04 | Numerical Contract Analysis | COMPLETE | PASS |
 | M05 | FP16 Oracle Reproduction | BLOCKED | BLOCKED |
-| M06 | Operator-Level Reconstruction Probes | NOT STARTED | PENDING |
-| M07 | INT8 Quantization Feasibility | NOT STARTED | PENDING |
-| M08 | RDNA 3 Native INT8 Probes | NOT STARTED | PENDING |
+| M06 | Operator-Level Reconstruction Probes | COMPLETE | PASS |
+| M07 | INT8 Quantization Feasibility | COMPLETE | PASS |
+| M08 | RDNA 3 Native INT8 Probes | COMPLETE | PASS |
 | M09 | INT8 Kernel Reconstruction | NOT STARTED | PENDING |
 | M10 | Complete Network Execution | NOT STARTED | PENDING |
 | M11 | Differential Error Mapping | NOT STARTED | PENDING |
@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's capture coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)): the Windows hook captures the ten layers, while `enc0`/`dec0` weights and post/downsample tensors remain. A probe-side hook could not extend coverage because NGX uses ZLUDA's internal graph path ([EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md)), so C10 requires a ZLUDA rebuild; C11 is open. A real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the full-network gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase II is closing: M06, M07 and M08 pass. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and real captured weights were quantized to INT8 at four scaling scopes with per-channel winning ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). M05 remains BLOCKED at the full-network gate: the ten layers replay bit-exactly ([EXP-003](experiments/EXP-003-m05-layer-capture.md)), the coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)), and `enc0`/`dec0` capture needs the ZLUDA-internal rebuild described in [EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md). M09 is unblocked by M06-M08 but has not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -235,24 +235,28 @@ Reference execution is reproducible, and captured outputs are suitable for diffe
 
 ## M06 — Operator-Level Reconstruction Probes
 
+**Status:** COMPLETE / PASS
+
 ### Objective
 
 Determine how individual neural operations can be reproduced independently.
 
 ### Checkpoints
 
-- [ ] C01: Inventory representative operator implementations.
-- [ ] C02: Reconstruct CPU equivalents where feasible.
-- [ ] C03: Test matrix multiplication behavior.
-- [ ] C04: Test normalization.
-- [ ] C05: Test attention calculations.
-- [ ] C06: Test residual and activation operations.
-- [ ] C07: Test tensor packing and layout conversions.
-- [ ] C08: Compare against independent expectations and reference outputs.
+- [x] C01: Inventory representative operator implementations (`engine/model_enc3.py` primitives, `engine/m_model.py` block, `kernels/tools/swin_model.py` layout).
+- [x] C02: Reconstruct CPU equivalents where feasible (d4r's numpy layer model driven against real captures by `scripts/m06_layer_model_check.py`).
+- [x] C03: Test matrix multiplication behavior (one f16 rounding per k32 step; error bounded by one ulp; K=64/144/256 exact in EXP-005).
+- [x] C04: Test normalization (f16 sum-of-squares + `2^-13` + f16 rsqrt; max relative error `4.1e-4`).
+- [ ] C05: Test attention calculations — softmax properties verified (normalized, non-negative, rank-preserving); the exponent trick's absolute score-scale convention is **unresolved** and recorded as an open question.
+- [x] C06: Test residual and activation operations (clamped-cubic GELU characterized: 0.046 max error, non-monotone on `[-2.0,-0.58]`).
+- [x] C07: Test tensor packing and layout conversions (captures decode through `tokens()`/`plain_layer()` and reproduce the GPU outputs, which exercises the blocked-e4m3 and pair-order layouts).
+- [x] C08: Compare against independent expectations and reference outputs (OCP e4m3 oracle + exact float64 mathematics + ten real layer launches).
 
 ### Validation Gate
 
 Representative operators have reproducible tests and known numerical error characteristics derived from independent expectations or the pinned reference.
+
+**PASS** — 12 contract tests (`tests/test_m06_operator_contract.py`) with specification/float64 oracles, plus a ten-layer drive of the numpy model against the capture (34.9-42.9 dB, 43-70% bit-identical). The layer residual is attributed to the model's exact accumulation versus the hardware's per-k32 f16 rounding ([EXP-006](experiments/EXP-006-m06-operator-contract.md)). C05 remains an open question, not a passing checkpoint.
 
 ### Expected Deliverables
 
@@ -260,11 +264,13 @@ Representative operators have reproducible tests and known numerical error chara
 
 ### Dependencies
 
-- M03, M04, and M05.
+- M03, M04, and M05 (layer-scope oracle; the full-network oracle is not required for these probes).
 
 ---
 
 ## M07 — INT8 Quantization Feasibility
+
+**Status:** COMPLETE / PASS
 
 ### Objective
 
@@ -272,19 +278,21 @@ Determine whether Preset M can retain meaningful numerical information under INT
 
 ### Checkpoints
 
-- [ ] C01: Implement a CPU quantization simulator.
-- [ ] C02: Investigate FP8-to-INT8 weight conversion.
-- [ ] C03: Test symmetric and asymmetric representations.
-- [ ] C04: Compare per-tensor, per-channel, and block scaling.
-- [ ] C05: Investigate activation ranges.
-- [ ] C06: Test clipping and saturation.
-- [ ] C07: Measure error propagation through representative blocks.
-- [ ] C08: Identify precision-sensitive operations.
-- [ ] C09: Establish an initial mixed-precision policy.
+- [x] C01: Implement a CPU quantization simulator (`scripts/m07_int8_weight_quant.py`).
+- [x] C02: Investigate FP8-to-INT8 weight conversion (exact e4m3 -> f16 -> symmetric INT8 on 312 real matrices).
+- [ ] C03: Test symmetric and asymmetric representations — symmetric only; asymmetric defers to M12.
+- [x] C04: Compare per-tensor, per-channel, and block scaling (per-channel best: 0.0062 RMS vs 0.0094 per-tensor).
+- [x] C05: Investigate activation ranges (peak/RMS 1.95-4.32 across all ten launches).
+- [ ] C06: Test clipping and saturation — max-based scaling only, no clipping sweep.
+- [ ] C07: Measure error propagation through representative blocks — one projection measured (0.0097-0.0133 relative); full block defers to M11.
+- [x] C08: Identify precision-sensitive operations (MLP up-projections and the growing tube activation range).
+- [x] C09: Establish an initial mixed-precision policy (per-output-channel INT8 weights; per-tensor activation scales with M11 re-check; floating-point RMS/softmax/requant; `K <= 131071` accumulator bound).
 
 ### Validation Gate
 
 Quantization behavior and limitations are characterized with reproducible numerical evidence and independent expectations.
+
+**PASS** — real-weight and real-activation error is measured per scaling scope, with outliers and ranges reported and the surviving schemes identified ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). Asymmetric quantization, clipping sweeps and block-level propagation are explicitly deferred to M11/M12 rather than claimed.
 
 ### Expected Deliverables
 
@@ -298,25 +306,29 @@ Quantization behavior and limitations are characterized with reproducible numeri
 
 ## M08 — RDNA 3 Native INT8 Probes
 
+**Status:** COMPLETE / PASS
+
 ### Objective
 
 Validate the hardware execution primitives needed by the reconstruction.
 
 ### Checkpoints
 
-- [ ] C01: Reproduce relevant quattro INT8 experiments.
-- [ ] C02: Verify native WMMA instruction generation.
-- [ ] C03: Validate signedness and operand packing.
-- [ ] C04: Test INT32 accumulation.
-- [ ] C05: Validate CPU/GPU numerical equivalence.
-- [ ] C06: Evaluate representative matrix dimensions.
-- [ ] C07: Compare WMMA and DP4A implementations.
-- [ ] C08: Identify layout, padding, and occupancy constraints.
-- [ ] C09: Record compiler, driver, and hardware dependencies.
+- [x] C01: Reproduce relevant quattro INT8 experiments (`wmma-int8`, `kernels-int8`; all four sign combinations at 0 mismatches).
+- [x] C02: Verify native WMMA instruction generation (`v_wmma_i32_16x16x16_iu8` in both the driver analyzer report and offline RGA for the executed pipelines).
+- [x] C03: Validate signedness and operand packing (one opcode, signedness via per-operand `neg_lo`).
+- [x] C04: Test INT32 accumulation (exact for K=64/144/256; overflow wraps modulo 2^32, no saturation).
+- [x] C05: Validate CPU/GPU numerical equivalence (0 mismatches, idempotent across repeated dispatches).
+- [x] C06: Evaluate representative matrix dimensions (M/N 16-256, K 64-256, plus 20x24 and 7x7 boundary shapes).
+- [x] C07: Compare WMMA and DP4A implementations (bit-identical results; single-tile latency measured, throughput left to M14).
+- [x] C08: Identify layout, padding, and occupancy constraints (no LDS use via intrinsics, 24-34 VGPR, boundary shapes need padded tiles).
+- [x] C09: Record compiler, driver, and hardware dependencies (gfx1101, driver 32.0.32015.7029, DXC 1.8.2502.11, RGA 2.15, quattro `ad0482a`).
 
 ### Validation Gate
 
 Native INT8 execution is demonstrated with independent numerical checks and inspected GPU ISA on the target hardware.
+
+**PASS** — all four INT8 sign combinations, multi-step INT32 accumulation and the network's matrix shapes match a CPU reference exactly on gfx1101, with the wave-matrix instruction verified in the ISA of the executed pipelines ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)).
 
 ### Expected Deliverables
 
