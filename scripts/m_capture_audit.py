@@ -115,6 +115,71 @@ def host_pointers(path, limit=8):
     return len(hits[:limit])
 
 
+# ---------------------------------------------------------------------------
+# image resources (textures and surfaces)
+
+
+def images(directory):
+    """Declared image targets of one launch, with their bindings.
+
+    Reads the `image` / `image-bind` / `image-unknown` lines the capture hook
+    writes next to `alloc`/`pointer`.  A target is one backing array or pitched
+    allocation, so the same array bound as a texture and as a surface appears
+    once with two bindings - that identity is what makes aliasing visible.
+    """
+    table = {}
+    bindings = []
+    unknown = []
+    with open(os.path.join(directory, 'manifest.txt')) as handle:
+        for line in handle:
+            q = line.split()
+            if not q:
+                continue
+            if q[0] == 'image':
+                table[int(q[1])] = {
+                    'kind': q[2], 'handle': int(q[3], 16), 'array': int(q[4], 16),
+                    'pitched': int(q[5], 16), 'width': int(q[6]),
+                    'height': int(q[7]), 'depth': int(q[8]),
+                    'format': int(q[9], 16), 'channels': int(q[10]),
+                    'original': int(q[11]), 'row_bytes': int(q[12]),
+                    'bytes': int(q[13]), 'pitch': int(q[14]) if len(q) > 14 else 0,
+                    'bindings': [],
+                }
+            elif q[0] == 'image-bind':
+                bindings.append({'image': int(q[1]), 'offset': int(q[2]), 'kind': q[3]})
+            elif q[0] == 'image-unknown':
+                unknown.append({'offset': int(q[1]), 'handle': q[2],
+                                'reason': ' '.join(q[3:])})
+    for binding in bindings:
+        if binding['image'] in table:
+            table[binding['image']]['bindings'].append(binding)
+    return table, unknown
+
+
+def image_state(directory, image_id):
+    """Pre/post bytes of one image target, and whether the launch changed it.
+
+    Returns None when the capture is missing a file.  `wrote` is the only
+    evidence of an output role used here: a surface handle is not proof that a
+    stage wrote, and a changed image is.
+    """
+    entry = {'pre': os.path.join(directory, f'image-{image_id}.bin'),
+             'post': os.path.join(directory, 'gpu-output', f'image-{image_id}.bin')}
+    for key in ('pre', 'post'):
+        if not os.path.exists(entry[key]):
+            return None
+    pre = np.fromfile(entry['pre'], np.uint8)
+    post = np.fromfile(entry['post'], np.uint8)
+    if pre.size != post.size:
+        return {'size_mismatch': [int(pre.size), int(post.size)]}
+    mask = pre != post
+    return {'bytes': int(pre.size), 'changed_bytes': int(mask.sum()),
+            'wrote': bool(mask.any()),
+            'first': int(np.nonzero(mask)[0][0]) if mask.any() else None,
+            'last': int(np.nonzero(mask)[0][-1]) if mask.any() else None}
+
+
+
 def audit(capture):
     stages = mw.discover(capture)
     seen = {}
@@ -124,13 +189,16 @@ def audit(capture):
         entry = {'stage': stage.stage, 'kernel': stage.kernel,
                  'instance': seen[stage.stage], 'sequence': stage.sequence,
                  'rank': stage.position, 'variant': stage.variant,
-                 'grid': None, 'args_bytes': None, 'allocations': [], 'pointers': []}
+                 'grid': None, 'args_bytes': None, 'allocations': [], 'pointers': [],
+                 'images': [], 'image_unknown': []}
         with open(os.path.join(stage.directory, 'manifest.txt')) as handle:
             lines = handle.read().split('\n')
         launch = lines[1].split()
         entry['grid'] = [int(v) for v in launch[1:4]]
         entry['block'] = [int(v) for v in launch[4:7]]
         entry['args_bytes'] = int(lines[2].split()[1])
+        entry['directory'] = stage.directory
+        entry['images'], entry['image_unknown'] = images(stage.directory)
         table = allocations(stage.directory)
         shared = {}
         for index, alloc in sorted(table.items()):
@@ -272,6 +340,68 @@ def edge_checks(capture, rows, written):
     return checks
 
 
+def image_edges(rows):
+    """Confirm image-mediated edges inside one frame.
+
+    Identity is the backing array (or pitched device pointer) the hook recorded,
+    which is a real allocation identity rather than a reused arena offset.  An
+    edge still has to be confirmed by content: the producer's post-launch image
+    must equal the consumer's pre-launch image byte for byte.  A stage's changed
+    images are its outputs, its unchanged images are its inputs - the surface
+    handle type alone is not treated as proof of a role.
+
+    A bound image with no in-frame producer is reported as `external`: it comes
+    from an earlier frame (history, recurrent feature) or from outside the
+    network (colour, depth, motion), and this capture cannot show that.
+    """
+    written, read = [], []
+    missing = []
+    for entry in rows:
+        for image_id, image in sorted(entry['images'].items()):
+            state = image_state(entry['directory'], image_id)
+            row = {'stage': entry['stage'], 'instance': entry['instance'],
+                   'rank': entry['rank'], 'image': image_id, 'kind': image['kind'],
+                   'directory': entry['directory'],
+                   'key': image['array'] or image['pitched'],
+                   'width': image['width'], 'height': image['height'],
+                   'depth': image['depth'], 'format': image['format'],
+                   'channels': image['channels'], 'bytes': image['bytes'],
+                   'bindings': image['bindings'], 'state': state}
+            if state is None or 'size_mismatch' in state:
+                missing.append(row)
+            elif state['wrote']:
+                written.append(row)
+            else:
+                read.append(row)
+
+    edges = []
+    for consumer in read:
+        matches = [p for p in written if p['key'] == consumer['key']
+                   and p['rank'] < consumer['rank']]
+        if not matches:
+            edges.append({'edge': f"? -> {consumer['stage']}", 'image': consumer['image'],
+                          'label': f"{consumer['kind']} 0x{consumer['key']:x} at arg "
+                                   f"{consumer['bindings'][0]['offset'] if consumer['bindings'] else '?'}",
+                          'verified': None,
+                          'reason': 'no in-frame producer: earlier frame or external input'})
+            continue
+        producer = max(matches, key=lambda p: p['rank'])
+        a = np.fromfile(os.path.join(producer['directory'], 'gpu-output',
+                                     f"image-{producer['image']}.bin"), np.uint8)
+        b = np.fromfile(os.path.join(consumer['directory'],
+                                     f"image-{consumer['image']}.bin"), np.uint8)
+        differing = int(np.count_nonzero(a != b)) if a.size == b.size else None
+        edges.append({'edge': f"{producer['stage']}#{producer['instance']} -> "
+                              f"{consumer['stage']}#{consumer['instance']}",
+                      'image': consumer['image'],
+                      'label': f"{consumer['kind']} 0x{consumer['key']:x}",
+                      'bytes': int(b.size),
+                      'verified': bool(a.size == b.size and differing == 0),
+                      'differing': differing})
+    edges.sort(key=lambda e: (e['edge'], e['label']))
+    return edges, missing
+
+
 def mm_channels(stage):
     return {'enc1': 64, 'enc2': 96, 'enc3_tube': 128, 'dec2': 96, 'dec1': 64}[stage]
 
@@ -310,7 +440,26 @@ def main():
                       f'{diff["region_count"]} range(s), first [{diff["first"]}, {diff["last"]}]')
             missing = [x for x in entry['allocations'] if x['kind'] == 'descriptor']
             if missing:
-                print(f'      {len(missing)} descriptor binding(s): texture/surface contents not captured')
+                print(f'      {len(missing)} descriptor binding(s): '
+                      f'{len(entry["images"])} image(s) captured, '
+                      f'{len(entry["image_unknown"])} unreadable')
+            for image_id, image in sorted(entry['images'].items()):
+                state = image_state(entry['directory'], image_id)
+                slots = ','.join(str(b['offset']) for b in image['bindings'])
+                shape = f'{image["width"]}x{image["height"]}'
+                if image['depth'] > 1:
+                    shape += f'x{image["depth"]}'
+                if state is None:
+                    print(f'      image {image_id} {shape} fmt=0x{image["format"]:02x} '
+                          f'ch={image["channels"]} at {slots}: NOT CAPTURED')
+                    continue
+                role = f'{state["changed_bytes"]} B changed' if state['wrote'] else 'unchanged'
+                print(f'      image {image_id} {image["kind"]:4s} {shape} '
+                      f'fmt=0x{image["format"]:02x} ch={image["channels"]} '
+                      f'row={image["row_bytes"]} at {slots}: {role}')
+            for unknown in entry['image_unknown']:
+                print(f'      image at arg {unknown["offset"]} handle {unknown["handle"]}: '
+                      f'UNREADABLE {unknown["reason"]}')
 
     print('\nwritten buffers (coalesced address ranges)')
     for span in written:
@@ -335,9 +484,27 @@ def main():
         print(f'  {entry["stage"]}: image/texture bindings only '
               f'({sum(1 for x in entry["allocations"] if x["kind"] == "descriptor")} descriptor(s))')
 
+    edges_image, missing_images = image_edges(rows)
+    print('\nimage edge checks (same backing array, producer post vs consumer pre)')
+    for check in edges_image:
+        if check['verified'] is None:
+            print(f'  {check["edge"]:26s} {check["label"]:40s} EXTERNAL: {check["reason"]}')
+            continue
+        state = 'identical' if check['verified'] else f'{check["differing"]} bytes differ'
+        print(f'  {check["edge"]:26s} {check["label"]:40s} {check["bytes"]:9d} B  {state}')
+    confirmed = sum(1 for c in edges_image if c.get('verified'))
+    external = sum(1 for c in edges_image if c.get('verified') is None)
+    print(f'  {confirmed} image edge(s) confirmed by content, {external} external/temporal')
+    if missing_images:
+        print('  images declared but not captured:')
+        for row in missing_images:
+            print(f'    {row["stage"]}#{row["instance"]} image {row["image"]} '
+                  f'{row["width"]}x{row["height"]}')
+
     if a.json:
         json.dump({'capture': a.capture, 'stages': rows, 'written': written,
-                   'edges': checks}, a.json, indent=2)
+                   'edges': checks, 'image_edges': edges_image,
+                   'images_missing': missing_images}, a.json, indent=2)
     return 0
 
 

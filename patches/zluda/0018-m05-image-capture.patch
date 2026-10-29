@@ -1,0 +1,723 @@
+diff --git a/zluda/src/impl/array.rs b/zluda/src/impl/array.rs
+index e611238..8a06bed 100644
+--- a/zluda/src/impl/array.rs
++++ b/zluda/src/impl/array.rs
+@@ -7,6 +7,40 @@ fn original_formats() -> &'static Mutex<HashMap<usize, u32>> {
+     FORMATS.get_or_init(|| Mutex::new(HashMap::new()))
+ }
+ 
++/// Geometry of a live array, recorded at creation so a diagnostic capture can
++/// read it back without a driver query. `format`/`channels` are the *backing*
++/// storage HIP allocated; `original_format` keeps CUDA's requested enum when it
++/// differs (packed 10:10:10:2 and the normalized 8/16-bit families).
++#[derive(Clone, Copy)]
++pub(crate) struct ArrayRecord {
++    pub(crate) width: usize,
++    pub(crate) height: usize,
++    pub(crate) depth: usize,
++    pub(crate) format: u32,
++    pub(crate) channels: u32,
++}
++
++fn records() -> &'static Mutex<HashMap<usize, ArrayRecord>> {
++    static RECORDS: OnceLock<Mutex<HashMap<usize, ArrayRecord>>> = OnceLock::new();
++    RECORDS.get_or_init(|| Mutex::new(HashMap::new()))
++}
++
++pub(crate) fn record(array: hipArray_t) -> Option<ArrayRecord> {
++    records().lock().ok()?.get(&(array as usize)).copied()
++}
++
++fn remember(array: hipArray_t, record: ArrayRecord) {
++    if let Ok(mut records) = records().lock() {
++        records.insert(array as usize, record);
++    }
++}
++
++fn forget(array: hipArray_t) {
++    if let Ok(mut records) = records().lock() {
++        records.remove(&(array as usize));
++    }
++}
++
+ pub(crate) fn original_format(array: hipArray_t) -> Result<Option<u32>, hipErrorCode_t> {
+     original_formats()
+         .lock()
+@@ -24,39 +58,59 @@ pub(crate) unsafe fn create_v2(
+     // For packed UNORM 10:10:10:2, use RGBA32F storage. The copy path expands
+     // public four-byte pixels to backing float channels.
+     let descriptor = &*desc;
+-    let (format, channels) = match descriptor.Format.0 {
+-        80 if descriptor.NumChannels == 4 => (hipArray_Format(32), 4), // RGBA32F backing
+-        192 => (hipArray_Format(1), 1),                                // UNORM_INT8X1
+-        193 => (hipArray_Format(1), 2),                                // UNORM_INT8X2
+-        194 => (hipArray_Format(1), 4),                                // UNORM_INT8X4
+-        195 => (hipArray_Format(2), 1),                                // UNORM_INT16X1
+-        196 => (hipArray_Format(2), 2),                                // UNORM_INT16X2
+-        197 => (hipArray_Format(2), 4),                                // UNORM_INT16X4
+-        198 => (hipArray_Format(8), 1),                                // SNORM_INT8X1
+-        199 => (hipArray_Format(8), 2),                                // SNORM_INT8X2
+-        200 => (hipArray_Format(8), 4),                                // SNORM_INT8X4
+-        201 => (hipArray_Format(9), 1),                                // SNORM_INT16X1
+-        202 => (hipArray_Format(9), 2),                                // SNORM_INT16X2
+-        203 => (hipArray_Format(9), 4),                                // SNORM_INT16X4
+-        _ => return hipArrayCreate(handle, desc),
++    let (format, channels, remapped) = match descriptor.Format.0 {
++        80 if descriptor.NumChannels == 4 => (hipArray_Format(32), 4, true), // RGBA32F backing
++        192 => (hipArray_Format(1), 1, true),                                // UNORM_INT8X1
++        193 => (hipArray_Format(1), 2, true),                                // UNORM_INT8X2
++        194 => (hipArray_Format(1), 4, true),                                // UNORM_INT8X4
++        195 => (hipArray_Format(2), 1, true),                                // UNORM_INT16X1
++        196 => (hipArray_Format(2), 2, true),                                // UNORM_INT16X2
++        197 => (hipArray_Format(2), 4, true),                                // UNORM_INT16X4
++        198 => (hipArray_Format(8), 1, true),                                // SNORM_INT8X1
++        199 => (hipArray_Format(8), 2, true),                                // SNORM_INT8X2
++        200 => (hipArray_Format(8), 4, true),                                // SNORM_INT8X4
++        201 => (hipArray_Format(9), 1, true),                                // SNORM_INT16X1
++        202 => (hipArray_Format(9), 2, true),                                // SNORM_INT16X2
++        203 => (hipArray_Format(9), 4, true),                                // SNORM_INT16X4
++        other => (hipArray_Format(other), descriptor.NumChannels, false),
+     };
+-    let backing = HIP_ARRAY_DESCRIPTOR {
+-        Width: descriptor.Width,
+-        Height: descriptor.Height,
+-        Format: format,
+-        NumChannels: channels,
+-    };
+-    hipArrayCreate(handle, &backing)?;
+-    if let Ok(mut formats) = original_formats().lock() {
+-        formats.insert(*handle as usize, descriptor.Format.0);
+-        Ok(())
++    if remapped {
++        let backing = HIP_ARRAY_DESCRIPTOR {
++            Width: descriptor.Width,
++            Height: descriptor.Height,
++            Format: format,
++            NumChannels: channels,
++        };
++        hipArrayCreate(handle, &backing)?;
++        {
++            let stored = original_formats()
++                .lock()
++                .map(|mut formats| {
++                    formats.insert(*handle as usize, descriptor.Format.0);
++                })
++                .is_ok();
++            if !stored {
++                let _ = hipArrayDestroy(*handle);
++                return Err(hipErrorCode_t::Unknown);
++            }
++        }
+     } else {
+-        let _ = hipArrayDestroy(*handle);
+-        Err(hipErrorCode_t::Unknown)
++        hipArrayCreate(handle, desc)?;
+     }
++    // Every live array is registered so a diagnostic capture can read it back;
++    // this is metadata only and does not change the allocation.
++    remember(*handle, ArrayRecord {
++        width: descriptor.Width,
++        height: descriptor.Height.max(1),
++        depth: 1,
++        format: format.0,
++        channels,
++    });
++    Ok(())
+ }
+ 
+ pub(crate) unsafe fn destroy(array: hipArray_t) -> hipError_t {
++    forget(array);
+     hipArrayDestroy(array)?;
+     original_formats()
+         .lock()
+@@ -70,7 +124,16 @@ pub(crate) unsafe fn _3d_create_v2(
+     handle: *mut hipArray_t,
+     desc: *const HIP_ARRAY3D_DESCRIPTOR,
+ ) -> hipError_t {
+-    hipArray3DCreate(handle, desc)
++    hipArray3DCreate(handle, desc)?;
++    let descriptor = &*desc;
++    remember(*handle, ArrayRecord {
++        width: descriptor.Width,
++        height: descriptor.Height.max(1),
++        depth: descriptor.Depth.max(1),
++        format: descriptor.Format.0,
++        channels: descriptor.NumChannels,
++    });
++    Ok(())
+ }
+ 
+ pub(crate) unsafe fn get_descriptor_v2(
+diff --git a/zluda/src/impl/d4r_replay.rs b/zluda/src/impl/d4r_replay.rs
+index 55f2b88..111f9f5 100644
+--- a/zluda/src/impl/d4r_replay.rs
++++ b/zluda/src/impl/d4r_replay.rs
+@@ -1,9 +1,27 @@
+ //! Opt-in, synchronous diagnostic captures. Never enabled in the game fast path.
+ //! Captures can contain proprietary network weights; keep them out of releases.
++//!
++//! Two kinds of resource are captured:
++//!   * every allocation a parameter block points at (the original format), and
++//!   * every array or pitched image behind a texture/surface object the launch
++//!     binds (`image_capture`), because Preset M's `enc0`, `dec0`, `post` and
++//!     `downsample` keep their operands and results in images, not buffers.
++//!
++//! The manifest keeps the old `alloc`/`pointer` lines unchanged and adds
++//! `image`, `image-bind` and `image-unknown` lines, so existing readers keep
++//! working and a binding that could not be read is named rather than dropped.
+ use hip_runtime_sys::*;
+-use std::{collections::HashMap, ffi::{c_void, CStr}, fs, path::PathBuf, sync::{Mutex, OnceLock}};
++use std::{
++    collections::HashMap,
++    ffi::{c_void, CStr},
++    fs,
++    path::PathBuf,
++    sync::{Mutex, OnceLock},
++};
+ 
+-struct Config { directory: PathBuf, filter: String, limit: u32 }
++use crate::r#impl::image_capture::{self, Binding, Target};
++
++struct Config { directory: PathBuf, filter: String, limit: u32, images: bool }
+ static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
+ static COUNTS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+ 
+@@ -40,7 +58,11 @@ fn parameter_size(name: &str) -> Option<usize> {
+     }
+ }
+ 
+-pub(crate) struct Capture { directory: PathBuf, allocations: Vec<(usize, usize)> }
++pub(crate) struct Capture {
++    directory: PathBuf,
++    allocations: Vec<(usize, usize)>,
++    images: Vec<Target>,
++}
+ 
+ fn io_error(error: impl std::fmt::Display) -> hipErrorCode_t {
+     eprintln!("[d4r-replay] capture failed: {error}");
+@@ -55,6 +77,22 @@ impl Capture {
+             unsafe { hipMemcpyDtoH(bytes.as_mut_ptr().cast(), hipDeviceptr_t(base as *mut c_void), size) }?;
+             fs::write(destination.join(format!("alloc-{id}.bin")), bytes).map_err(io_error)?;
+         }
++        // An image read failure must not cost the whole capture: the manifest
++        // already names the binding, and a missing file is reported by the
++        // audit as an explicit gap rather than a silently absent resource.
++        for (id, target) in self.images.iter().enumerate() {
++            match unsafe { image_capture::read(target) } {
++                Ok(bytes) => {
++                    fs::write(destination.join(format!("image-{id}.bin")), bytes).map_err(io_error)?;
++                }
++                Err(reason) => {
++                    eprintln!(
++                        "[d4r-replay] image {id} ({} handle 0x{:x}) not written: {reason}",
++                        target.kind, target.handle
++                    );
++                }
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -66,6 +104,32 @@ impl Capture {
+     }
+ }
+ 
++/// Resolve a parameter value that names a texture or surface object, keeping one
++/// record per backing storage so aliases stay visible.
++fn record_image(
++    images: &mut Vec<Target>,
++    unresolved: &mut Vec<(usize, usize, String)>,
++    offset: usize,
++    pointer: usize,
++) {
++    let Some(resolved) = image_capture::resolve(pointer) else { return };
++    let mut target = match resolved {
++        Ok(target) => target,
++        Err(reason) => {
++            unresolved.push((offset, pointer, reason));
++            return;
++        }
++    };
++    let binding = Binding { offset, kind: target.kind };
++    match images.iter_mut().find(|existing| existing.same_storage(&target)) {
++        Some(existing) => existing.bindings.push(binding),
++        None => {
++            target.bindings.push(binding);
++            images.push(target);
++        }
++    }
++}
++
+ pub(crate) unsafe fn begin(
+     name: &CStr, stream: hipStream_t, parameters: *mut *mut c_void,
+     extra: *mut *mut c_void, launch: [u32; 7],
+@@ -74,6 +138,9 @@ pub(crate) unsafe fn begin(
+         directory: directory.into(),
+         filter: std::env::var("D4R_CUDA_REPLAY_DUMP_FILTER").unwrap_or_default(),
+         limit: std::env::var("D4R_CUDA_REPLAY_DUMP_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(1),
++        // Image capture has its own switch: a buffer-only capture must still
++        // reproduce the pre-extension format byte for byte.
++        images: std::env::var("D4R_CUDA_IMAGE_DUMP").map(|v| v != "0").unwrap_or(true),
+     })) else { return Ok(None) };
+     let name = name.to_str().map_err(io_error)?;
+     // Only audited single-by-value K/M argument blocks. Never infer the size
+@@ -107,6 +174,7 @@ pub(crate) unsafe fn begin(
+         *count += 1;
+         *count
+     };
++    eprintln!("[d4r-replay] hook kernel={name} seq={sequence}");
+     hipStreamSynchronize(stream)?;
+     let arguments = std::slice::from_raw_parts(block, parameter_bytes);
+     let directory = config.directory.join(format!("replay-{sequence:06}-{name}"));
+@@ -115,9 +183,17 @@ pub(crate) unsafe fn begin(
+     let mut manifest = format!("kernel {name}\nlaunch {} {} {} {} {} {} {}\nargs {parameter_bytes}\n",
+         launch[0], launch[1], launch[2], launch[3], launch[4], launch[5], launch[6]);
+     let mut allocations = Vec::<(usize, usize)>::new();
++    let mut images = Vec::<Target>::new();
++    let mut unresolved = Vec::<(usize, usize, String)>::new();
+     for offset in (0..parameter_bytes).step_by(8) {
+         let pointer = u64::from_le_bytes(arguments[offset..offset + 8].try_into().unwrap()) as usize;
+         if pointer == 0 { continue; }
++        // A texture/surface handle is also a device allocation; record the image
++        // behind it *and* keep the handle block in the allocation list, which is
++        // the evidence that the binding exists at all.
++        if config.images {
++            record_image(&mut images, &mut unresolved, offset, pointer);
++        }
+         let mut base = hipDeviceptr_t(std::ptr::null_mut());
+         let mut size = 0;
+         if hipMemGetAddressRange(&mut base, &mut size, hipDeviceptr_t(pointer as *mut c_void)).is_err() { continue; }
+@@ -136,10 +212,35 @@ pub(crate) unsafe fn begin(
+         manifest.push_str(&format!("pointer {offset} {id} {}\n", pointer - base));
+     }
+     if allocations.is_empty() { return Err(io_error("no allocation pointers resolved")); }
++    for (id, target) in images.iter().enumerate() {
++        manifest.push_str(&format!(
++            "image {id} {} 0x{:x} 0x{:x} 0x{:x} {} {} {} 0x{:02x} {} {} {} {} {}\n",
++            target.kind,
++            target.handle,
++            target.array_address().unwrap_or(0),
++            target.pitched_address().unwrap_or(0),
++            target.width,
++            target.height,
++            target.depth,
++            target.format,
++            target.channels,
++            target.original.unwrap_or(0),
++            target.row_bytes,
++            target.bytes,
++            target.pitch,
++        ));
++        for binding in &target.bindings {
++            manifest.push_str(&format!("image-bind {id} {} {}\n", binding.offset, binding.kind));
++        }
++    }
++    for (offset, pointer, reason) in &unresolved {
++        manifest.push_str(&format!("image-unknown {offset} 0x{pointer:x} {reason}\n"));
++    }
+     fs::write(directory.join("manifest.txt"), manifest).map_err(io_error)?;
+-    let capture = Capture { directory, allocations };
++    let capture = Capture { directory, allocations, images };
+     capture.save(&capture.directory)?;
+-    eprintln!("[d4r-replay] begin kernel={name} allocations={} path={}", capture.allocations.len(), capture.directory.display());
++    eprintln!("[d4r-replay] begin kernel={name} allocations={} images={} path={}",
++        capture.allocations.len(), capture.images.len(), capture.directory.display());
+     Ok(Some(capture))
+ }
+ 
+diff --git b/zluda/src/impl/image_capture.rs b/zluda/src/impl/image_capture.rs
+new file mode 100644
+index 0000000..be36f9a
+--- /dev/null
++++ b/zluda/src/impl/image_capture.rs
+@@ -0,0 +1,315 @@
++//! Diagnostic capture of image-backed CUDA resources.
++//!
++//! The buffer hook in `d4r_replay` can only see allocations that a kernel's
++//! parameter block points at directly. Preset M's `enc0`, `dec0`, `post` and
++//! `downsample` instead bind CUDA texture and surface *objects*: the parameter
++//! holds a device-side handle, and the pixels live in the array behind it. This
++//! module resolves a handle back to its `HIP_RESOURCE_DESC` (recorded when the
++//! object was created), then to the array or pitched allocation, and reads the
++//! storage with an ordinary HIP copy.
++//!
++//! Rules this module keeps:
++//!   * a read is a copy, never a write: the captured resource is not modified;
++//!   * only storage HIP actually allocated is recorded - a packed 10:10:10:2
++//!     array is dumped as its RGBA32F backing, and `original` says so;
++//!   * an object whose resource type is not handled is reported, not skipped
++//!     silently, so the audit can name the missing binding;
++//!   * the same array bound through two handles is one target, which keeps
++//!     alias information (a surface `dec0` writes and a texture `post` reads are
++//!     the same bytes) instead of duplicating it.
++//!
++//! Never enabled unless the replay hook itself is enabled by
++//! `D4R_CUDA_REPLAY_DUMP_DIR`; the registries it reads are cheap metadata only.
++
++use crate::r#impl::{array, surf, tex};
++use hip_runtime_sys::*;
++
++/// One parameter-block slot binding this object.
++#[derive(Clone, Copy)]
++pub(crate) struct Binding {
++    pub(crate) offset: usize,
++    pub(crate) kind: &'static str,
++}
++
++/// Where the pixels actually live.
++#[derive(Clone, Copy)]
++pub(crate) enum Storage {
++    Array { array: hipArray_t },
++    Pitched { device: hipDeviceptr_t, pitch: usize },
++}
++
++/// A resolved image binding: identity, geometry and a reproducible readout.
++pub(crate) struct Target {
++    pub(crate) kind: &'static str,
++    pub(crate) handle: usize,
++    pub(crate) storage: Storage,
++    pub(crate) bindings: Vec<Binding>,
++    pub(crate) width: usize,
++    pub(crate) height: usize,
++    pub(crate) depth: usize,
++    pub(crate) format: u32,
++    pub(crate) channels: u32,
++    pub(crate) original: Option<u32>,
++    pub(crate) row_bytes: usize,
++    /// Source row stride for pitched storage; 0 when the storage is an array.
++    pub(crate) pitch: usize,
++    pub(crate) bytes: usize,
++}
++
++impl Target {
++    /// Two handles on the same storage are one target.
++    pub(crate) fn same_storage(&self, other: &Target) -> bool {
++        match (self.storage, other.storage) {
++            (Storage::Array { array: a }, Storage::Array { array: b }) => a == b,
++            (
++                Storage::Pitched { device: a, pitch: pa },
++                Storage::Pitched { device: b, pitch: pb },
++            ) => a.0 == b.0 && pa == pb,
++            _ => false,
++        }
++    }
++
++    pub(crate) fn array_address(&self) -> Option<usize> {
++        match self.storage {
++            Storage::Array { array } => Some(array as usize),
++            Storage::Pitched { .. } => None,
++        }
++    }
++
++    pub(crate) fn pitched_address(&self) -> Option<usize> {
++        match self.storage {
++            Storage::Pitched { device, .. } => Some(device.0 as usize),
++            Storage::Array { .. } => None,
++        }
++    }
++}
++
++/// Byte size of one channel for the HIP/CUDA array formats HIP accepts.
++///
++/// HIP reuses CUDA's `CUarray_format` numbering: 0x01/0x08 are 8-bit,
++/// 0x02/0x09/0x10 (HALF) are 16-bit, 0x03/0x0A/0x20 (FLOAT) are 32-bit.
++pub(crate) fn element_bytes(format: u32) -> Option<usize> {
++    match format {
++        0x01 | 0x08 => Some(1),
++        0x02 | 0x09 | 0x10 => Some(2),
++        0x03 | 0x0a | 0x20 => Some(4),
++        _ => None,
++    }
++}
++
++fn geometry(
++    width: usize,
++    height: usize,
++    depth: usize,
++    format: u32,
++    channels: u32,
++) -> Result<(usize, usize), String> {
++    let element = element_bytes(format)
++        .ok_or_else(|| format!("unknown array format 0x{format:02x}"))?;
++    if channels == 0 || channels > 4 {
++        return Err(format!("implausible channel count {channels}"));
++    }
++    let row_bytes = width * channels as usize * element;
++    let bytes = row_bytes * height.max(1) * depth.max(1);
++    if bytes == 0 {
++        return Err("zero-extent image".to_owned());
++    }
++    Ok((row_bytes, bytes))
++}
++
++/// Resolve one parameter-block value to an image, if it is a texture or surface
++/// object created in this process.
++///
++/// `Ok(None)` means "not an image handle" (the caller treats it as a buffer).
++/// `Ok(Some(Err(..)))` means "an image handle this hook cannot read": the
++/// caller records the reason so no binding disappears without a trace.
++#[allow(clippy::type_complexity)]
++pub(crate) fn resolve(handle: usize) -> Option<Result<Target, String>> {
++    for (kind, descriptor) in [
++        ("tex", tex::resource_desc(handle)),
++        ("surf", surf::resource_desc(handle)),
++    ] {
++        let Some(descriptor) = descriptor else { continue };
++        return Some(from_descriptor(kind, handle, descriptor));
++    }
++    None
++}
++
++fn from_descriptor(
++    kind: &'static str,
++    handle: usize,
++    descriptor: HIP_RESOURCE_DESC,
++) -> Result<Target, String> {
++    let resource = descriptor.resType;
++    if resource == HIPresourcetype::HIP_RESOURCE_TYPE_ARRAY {
++        let raw = unsafe { descriptor.res.array.hArray };
++        if raw.is_null() {
++            return Err("array object with a null array handle".to_owned());
++        }
++        let record = array::record(raw).ok_or_else(|| {
++            format!(
++                "array 0x{:x} was not created through this hook's array registry",
++                raw as usize
++            )
++        })?;
++        let (row_bytes, bytes) = geometry(
++            record.width,
++            record.height,
++            record.depth,
++            record.format,
++            record.channels,
++        )?;
++        return Ok(Target {
++            kind,
++            handle,
++            storage: Storage::Array { array: raw },
++            bindings: Vec::new(),
++            width: record.width,
++            height: record.height,
++            depth: record.depth,
++            format: record.format,
++            channels: record.channels,
++            original: array::original_format(raw).ok().flatten(),
++            row_bytes,
++            pitch: 0,
++            bytes,
++        });
++    }
++    if resource == HIPresourcetype::HIP_RESOURCE_TYPE_PITCH2D {
++        let p = unsafe { descriptor.res.pitch2D };
++        if p.devPtr.0.is_null() {
++            return Err("pitched object with a null device pointer".to_owned());
++        }
++        let (natural_row, _) = geometry(p.width, p.height, 1, p.format.0, p.numChannels)?;
++        let pitch = if p.pitchInBytes == 0 { natural_row } else { p.pitchInBytes };
++        if pitch < natural_row {
++            return Err(format!(
++                "pitched object: pitch {pitch} is narrower than one row ({natural_row})"
++            ));
++        }
++        return Ok(Target {
++            kind,
++            handle,
++            storage: Storage::Pitched { device: p.devPtr, pitch },
++            bindings: Vec::new(),
++            width: p.width,
++            height: p.height,
++            depth: 1,
++            format: p.format.0,
++            channels: p.numChannels,
++            original: None,
++            row_bytes: natural_row,
++            pitch,
++            bytes: natural_row * p.height.max(1),
++        });
++    }
++    if resource == HIPresourcetype::HIP_RESOURCE_TYPE_LINEAR {
++        let p = unsafe { descriptor.res.linear };
++        if p.devPtr.0.is_null() || p.sizeInBytes == 0 {
++            return Err("linear object with null storage".to_owned());
++        }
++        // A linear resource has no pitch: one row of `sizeInBytes` bytes, read raw.
++        return Ok(Target {
++            kind,
++            handle,
++            storage: Storage::Pitched {
++                device: p.devPtr,
++                pitch: p.sizeInBytes,
++            },
++            bindings: Vec::new(),
++            width: p.sizeInBytes,
++            height: 1,
++            depth: 1,
++            format: 0x01,
++            channels: 1,
++            original: None,
++            row_bytes: p.sizeInBytes,
++            pitch: p.sizeInBytes,
++            bytes: p.sizeInBytes,
++        });
++    }
++    Err(format!(
++        "resource type {:?} (mipmapped or reserved) has no readback path here",
++        resource
++    ))
++}
++
++/// Copy the image's storage to host memory without modifying the resource.
++pub(crate) unsafe fn read(target: &Target) -> Result<Vec<u8>, String> {
++    let mut buffer = vec![0u8; target.bytes];
++    match target.storage {
++        Storage::Array { array } => {
++            if target.depth <= 1 {
++                let mut copy: hip_Memcpy2D = std::mem::zeroed();
++                copy.srcMemoryType = hipMemoryType::hipMemoryTypeArray;
++                copy.srcArray = array;
++                copy.dstMemoryType = hipMemoryType::hipMemoryTypeHost;
++                copy.dstHost = buffer.as_mut_ptr().cast();
++                copy.dstPitch = target.row_bytes;
++                copy.WidthInBytes = target.row_bytes;
++                copy.Height = target.height;
++                hipMemcpyParam2D(&copy)
++                    .map_err(|error| format!("array readback failed: {error:?}"))?;
++            } else {
++                let mut copy: HIP_MEMCPY3D = std::mem::zeroed();
++                copy.srcMemoryType = hipMemoryType::hipMemoryTypeArray;
++                copy.srcArray = array;
++                copy.dstMemoryType = hipMemoryType::hipMemoryTypeHost;
++                copy.dstHost = buffer.as_mut_ptr().cast();
++                copy.dstPitch = target.row_bytes;
++                copy.dstHeight = target.height;
++                copy.WidthInBytes = target.row_bytes;
++                copy.Height = target.height;
++                copy.Depth = target.depth;
++                hipDrvMemcpy3D(&copy)
++                    .map_err(|error| format!("3D array readback failed: {error:?}"))?;
++            }
++        }
++        Storage::Pitched { device, pitch } => {
++            // One linear copy of the whole pitched region, then pack the rows.
++            // A 2D copy would depend on the driver's 2D path; a linear copy plus
++            // an explicit repack keeps the dumped layout defined by `row_bytes`
++            // alone, which is what the manifest promises.
++            let mut raw = vec![0u8; pitch * target.height.max(1)];
++            hipMemcpy(
++                raw.as_mut_ptr().cast(),
++                device.0.cast(),
++                raw.len(),
++                hipMemcpyKind::hipMemcpyDeviceToHost,
++            )
++            .map_err(|error| format!("pitched readback failed: {error:?}"))?;
++            for row in 0..target.height.max(1) {
++                let from = row * pitch;
++                let to = row * target.row_bytes;
++                buffer[to..to + target.row_bytes]
++                    .copy_from_slice(&raw[from..from + target.row_bytes]);
++            }
++        }
++    }
++    Ok(buffer)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn array_formats_map_to_storage_widths() {
++        assert_eq!(element_bytes(0x01), Some(1));
++        assert_eq!(element_bytes(0x08), Some(1));
++        assert_eq!(element_bytes(0x02), Some(2));
++        assert_eq!(element_bytes(0x10), Some(2));
++        assert_eq!(element_bytes(0x20), Some(4));
++        assert_eq!(element_bytes(0x00), None);
++        assert_eq!(element_bytes(0x40), None);
++    }
++
++    #[test]
++    fn geometry_is_exact() {
++        assert_eq!(geometry(37, 13, 1, 0x10, 4).unwrap(), (37 * 8, 37 * 8 * 13));
++        assert_eq!(geometry(960, 540, 1, 0x20, 4).unwrap(), (15360, 15360 * 540));
++        assert!(geometry(4, 4, 1, 0x77, 1).is_err());
++        assert!(geometry(4, 4, 1, 0x10, 0).is_err());
++        assert!(geometry(0, 4, 1, 0x10, 1).is_err());
++    }
++}
+diff --git a/zluda/src/impl/mod.rs b/zluda/src/impl/mod.rs
+index 380eb6e..1637932 100644
+--- a/zluda/src/impl/mod.rs
++++ b/zluda/src/impl/mod.rs
+@@ -11,6 +11,7 @@ pub(super) mod event;
+ pub(super) mod function;
+ pub(super) mod graph;
+ pub(super) mod hipfix;
++pub(super) mod image_capture;
+ pub(super) mod kernel;
+ pub(super) mod library;
+ pub(super) mod memory;
+diff --git a/zluda/src/impl/surf.rs b/zluda/src/impl/surf.rs
+index 5ef0f53..e7424c0 100644
+--- a/zluda/src/impl/surf.rs
++++ b/zluda/src/impl/surf.rs
+@@ -91,6 +91,26 @@ pub(crate) unsafe fn object_destroy(surface: hipSurfaceObject_t) -> hipError_t {
+     free_result
+ }
+ 
++/// The resource descriptor an existing (device-side) surface object was created
++/// from. Diagnostic use only; the capture hook needs the array behind the handle.
++pub(crate) fn resource_desc(surface: usize) -> Option<HIP_RESOURCE_DESC> {
++    let resources = surface_resources().lock().ok()?;
++    let info = resources.get(&surface)?;
++    let bytes = &info.descriptor;
++    if bytes.len() != std::mem::size_of::<HIP_RESOURCE_DESC>() {
++        return None;
++    }
++    let mut descriptor: HIP_RESOURCE_DESC = unsafe { std::mem::zeroed() };
++    unsafe {
++        std::ptr::copy_nonoverlapping(
++            bytes.as_ptr(),
++            (&mut descriptor as *mut HIP_RESOURCE_DESC).cast::<u8>(),
++            bytes.len(),
++        );
++    }
++    Some(descriptor)
++}
++
+ pub(crate) unsafe fn object_get_resource_desc(
+     output: &mut HIP_RESOURCE_DESC,
+     surface: hipSurfaceObject_t,
+diff --git a/zluda/src/impl/tex.rs b/zluda/src/impl/tex.rs
+index b614afe..f7af1c3 100644
+--- a/zluda/src/impl/tex.rs
++++ b/zluda/src/impl/tex.rs
+@@ -53,6 +53,27 @@ pub(crate) unsafe fn object_get_resource_desc(
+     Ok(())
+ }
+ 
++/// The resource descriptor an existing texture object was created from.
++///
++/// Diagnostic use only (the replay capture): a launch receives the device-side
++/// handle, and this is the only way back to the array behind it.
++pub(crate) fn resource_desc(handle: usize) -> Option<HIP_RESOURCE_DESC> {
++    let resources = object_resources().lock().ok()?;
++    let bytes = resources.get(&handle)?;
++    if bytes.len() != std::mem::size_of::<HIP_RESOURCE_DESC>() {
++        return None;
++    }
++    let mut descriptor: HIP_RESOURCE_DESC = unsafe { std::mem::zeroed() };
++    unsafe {
++        std::ptr::copy_nonoverlapping(
++            bytes.as_ptr(),
++            (&mut descriptor as *mut HIP_RESOURCE_DESC).cast::<u8>(),
++            bytes.len(),
++        );
++    }
++    Some(descriptor)
++}
++
+ pub(crate) unsafe fn ref_set_array(
+     texref: *mut textureReference,
+     array: hipArray_t,
