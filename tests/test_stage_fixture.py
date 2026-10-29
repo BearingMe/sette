@@ -331,5 +331,72 @@ class Dec0Fixture(unittest.TestCase):
         # surfaces; the covariance's format is checked by the shader binding
 
 
+class Enc0Fixture(unittest.TestCase):
+    """enc0's declared geometry, checked before any bytes move.
+
+    The stage writes a *buffer* through `st.global`, so the field's byte count is
+    the contract; and the two sizes in the parameter block (padded 544, visible
+    540) are both load-bearing for different reasons.
+    """
+
+    def record(self, **overrides):
+        record = {
+            'params': {'padded': [960, 544], 'visible': [960, 540],
+                       'frame': 0, 'reset': 1},
+            'bindings': {
+                'weights': {'kind': 'buffer', 'bytes': 12416},
+                'colour': {'kind': 'image', 'format': 'R16G16B16A16_FLOAT',
+                           'geometry': [960, 540, 1]},
+                'tokens': {'kind': 'buffer', 'output': True, 'bytes': 2 * 272 * 480 * 32},
+            },
+            'groups': [2040, 1, 1], 'threads': [64, 1, 1],
+        }
+        for key, value in overrides.items():
+            if key in record['params']:
+                record['params'][key] = value
+            elif key in record['bindings']:
+                record['bindings'][key].update(value)
+            else:
+                record[key] = value
+        return record
+
+    def test_a_consistent_record_has_no_problems(self):
+        self.assertEqual(fx.validate_stage('enc0', self.record()), [])
+
+    def test_the_field_is_two_planes_of_the_padded_grid(self):
+        record = self.record()
+        record['bindings']['tokens']['bytes'] = 2 * 270 * 480 * 32
+        problems = fx.validate_stage('enc0', record)
+        self.assertTrue(any('token field' in p for p in problems), problems)
+
+    def test_the_blob_is_the_dither_table_matrix_and_bias(self):
+        record = self.record()
+        record['bindings']['weights']['bytes'] = 8192
+        problems = fx.validate_stage('enc0', record)
+        self.assertTrue(any('weight blob' in p for p in problems), problems)
+        self.assertEqual(4096 + 8192 + 128, 12416)
+
+    def test_the_reset_frame_is_the_only_one_implemented(self):
+        # the history, previous-feature and exposure slots are only provably zero
+        # on a reset frame; accepting a history frame would silently drop them
+        problems = fx.validate_stage('enc0', self.record(reset=0))
+        self.assertTrue(any('reset' in p for p in problems), problems)
+
+    def test_the_colour_texture_is_the_visible_size(self):
+        record = self.record()
+        record['bindings']['colour']['geometry'] = [960, 544, 1]
+        problems = fx.validate_stage('enc0', record)
+        self.assertTrue(any('colour' in p for p in problems), problems)
+
+    def test_the_dither_frame_must_be_in_the_table(self):
+        problems = fx.validate_stage('enc0', self.record(frame=8))
+        self.assertTrue(any('frame' in p for p in problems), problems)
+        self.assertEqual(8 << 8, 2048)          # the u16 table has 2048 entries
+
+    def test_the_dispatch_must_cover_every_token(self):
+        problems = fx.validate_stage('enc0', self.record(groups=[8, 1, 1]))
+        self.assertTrue(any('tokens' in p for p in problems), problems)
+
+
 if __name__ == '__main__':
     sys.exit(unittest.main())

@@ -89,18 +89,66 @@ class WeightLayout(unittest.TestCase):
 # the dither
 
 def dither(value, n):
-    """The kernel's dithered truncation: `and 0xFC00` / `or n` / add / sub / `and 0xFF80`."""
+    """The kernel's dithered truncation, transcribed instruction by instruction.
+
+        and.b32  e,  h, 0xFC00FC00
+        or.b32   en, n, e
+        add.f16x2 a, h, en          <- the clamped value, not its exponent
+        sub.f16x2 t, a, e
+        and.b32  r,  t, 0xFF80FF80
+    """
     h = np.float16(np.clip(np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0),
-                           0.0, 1024.0))
+                           -np.inf, 1024.0))
     bits = int(h.view(U16))
     e = bits & 0xFC00
-    added = np.float16(np.float32(np.uint16(e | n).view(np.float16))
-                       + np.float32(h))
+    added = np.float16(np.float32(h) + np.float32(np.uint16(e | n).view(np.float16)))
     t = np.float16(np.float32(added) - np.float32(np.uint16(e).view(np.float16)))
     return np.uint16(int(t.view(U16)) & 0xFF80).view(np.float16)
 
 
 class Dither(unittest.TestCase):
+    def test_the_add_is_against_the_clamped_value(self):
+        """The mantissa must survive into the sum.
+
+        `add.f16x2 %r224, %r225, %r226` takes `%r225` - the f16 of the value -
+        and `%r226` = `e | n`.  Adding to `e` instead collapses every value in an
+        exponent bin onto the same result: 0.75 and 0.5 would both dither to 0.5.
+        The oracle's earlier bug did exactly that and lost half the distinct
+        token vectors.
+        """
+        # 0.75 = 0x3A00, e = 0x3800 = 0.5, so 0.75 + 0.5 - 0.5 = 0.75
+        self.assertEqual(float(dither(0.75, 0)), 0.75)
+        self.assertEqual(float(dither(0.5, 0)), 0.5)
+        self.assertNotEqual(float(dither(0.75, 0)), float(dither(0.5, 0)))
+        # and the two differ from the exponent-only form on every bin
+        for value in (0.625, 0.75, 0.875, 1.25, 1.5, 3.75):
+            h = np.float16(value)
+            e = np.uint16(int(h.view(U16)) & 0xFC00)
+            added = np.float16(np.float32(np.uint16(e).view(np.float16))
+                               + np.float32(np.uint16(int(e) | 0).view(np.float16)))
+            t = np.float16(np.float32(added)
+                           - np.float32(np.uint16(e).view(np.float16)))
+            broken = np.uint16(int(t.view(U16)) & 0xFF80).view(np.float16)
+            self.assertNotEqual(float(dither(value, 0)), float(broken), value)
+
+    def test_hand_computed_cases(self):
+        """Values worked out from the instruction sequence, not from the code."""
+        # 0.5 -> e|127 = 0.5620117; 0.5 + that = 1.0625 (a tie, resolved up);
+        # minus 0.5 = 0.5625, which survives 0xFF80
+        self.assertEqual(float(dither(0.5, 127)), 0.5625)
+        # 0.5 -> e|64 = 0.53125; 0.5 + 0.53125 = 1.03125; - 0.5 = 0.53125;
+        # 0x3840 & 0xFF80 = 0x3800 = 0.5
+        self.assertEqual(float(dither(0.5, 64)), 0.5)
+        # 0.75 -> e|127 = 0.5620117; sum 1.3125; - 0.5 = 0.8125
+        self.assertEqual(float(dither(0.75, 127)), 0.8125)
+        # 1.0 -> 1.0 + 1.0 = 2.0; - 1.0 = 1.0
+        self.assertEqual(float(dither(1.0, 0)), 1.0)
+        # the sign carries through `e` and survives the 0xFF80 mask
+        self.assertEqual(float(dither(-0.5, 0)), -0.5)
+        self.assertEqual(float(dither(-1.0, 0)), -1.0)
+        # zero stays zero: n < 128 never reaches bit 7 of the mantissa
+        self.assertEqual(float(dither(0.0, 127)), 0.0)
+
     def test_the_index_is_frame_row_tile(self):
         # prmt.b32 d, frame, (y&15)<<4 | (x&15), 0x2104 -> (frame<<8) | tile
         def index(frame, x, y):
@@ -133,7 +181,7 @@ class Dither(unittest.TestCase):
                 code = int(mw.e4m3_encode(np.array([dither(value, n)], np.float32))[0])
                 got = float(mw.e4m3_decode(np.uint8(code)))
                 self.assertLessEqual(abs(got), 448.0 + 1e-9, (value, n, got))
-                self.assertIn(got, grid, (value, n, got))
+                self.assertIn(abs(got), grid, (value, n, got))
 
     def test_dither_spans_exactly_one_e4m3_step(self):
         # n in 0..127 covers one quantization interval of the e4m3 grid, so the
@@ -196,14 +244,70 @@ class TokenField(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # the feature slots
+#
+# Two independent derivations, then a comparison.
+#
+# (a) The 20 values the kernel computes per pixel, in instruction order
+#     (f292..f311): its own texel, the four motion candidates (which on a reset
+#     frame are the same texel again), the exposure scalar and the RGB A of the
+#     history sample.  `reset` zeroes the last five.
+# (b) The physical slot order, from the two `st.shared.v4.u32` stores: each
+#     4-byte word packs one `cvt.rn.satfinite.e4m3x2` of two f16x2 dither
+#     registers, and the stores write words {r230,r231}, {r232,r233}, ...
+#
+# The map the model and the shader must both use is (b) applied to (a).
 
-#: The 32 slots of one pixel that carry a value, from d4r's pinned
-#: `enc0_features.glsl` (documented there as the same 32 slots the PTX fills) and
-#: confirmed against the PTX's 16-byte shared-memory stores.  On a reset frame
-#: `h[k] == colour`, so the vector is a function of one texel.
-SLOT_CHANNEL = {0: 0, 1: 1, 4: 2,
-                5: 0, 8: 0, 9: 0, 12: 1, 13: 1, 16: 1,
-                17: 2, 20: 2, 21: 2, 24: 0, 25: 0, 28: 0}
+def ptx_value_sequence():
+    """f292..f311: which value each slot of the *value* sequence carries."""
+    own = ['r', 'g', 'b']
+    candidates = ['r', 'g', 'b'] * 4           # f295..f306, four 2x2 neighbours
+    return own + candidates + ['exposure'] + ['history'] * 4
+
+
+def ptx_slot_order():
+    """The 32 slots in store order, as indices into the value sequence (-1 = zero).
+
+    The 16 `cvt.rn.satfinite.e4m3x2` results and the value pair each packs, in
+    the order the PTX emits them:
+        r230 (f292,f293)  r231 (f308,f309)  r232 (f294,f295)  r233 (f310,f311)
+        r234 (f296,f297)  r235 (0,0)        r236 (f298,f299)  r237 (0,0)
+        r238 (f300,f301)  r239 (0,0)        r240 (f302,f303)  r241 (0,0)
+        r242 (f304,f305)  r243 (0,0)        r244 (f306,f307)  r245 (0,0)
+    and the two `st.shared.v4.u32` stores, each packing four registers into a
+    16-byte group:
+        [r256]      = {r230, r231}, {r232, r233}, {r234, r235}, {r236, r237}
+        [r256+1024] = {r238, r239}, {r240, r241}, {r242, r243}, {r244, r245}
+    """
+    pairs = {'r230': (0, 1), 'r231': (16, 17), 'r232': (2, 3), 'r233': (18, 19),
+             'r234': (4, 5), 'r235': (-1, -1), 'r236': (6, 7), 'r237': (-1, -1),
+             'r238': (8, 9), 'r239': (-1, -1), 'r240': (10, 11), 'r241': (-1, -1),
+             'r242': (12, 13), 'r243': (-1, -1), 'r244': (14, 15), 'r245': (-1, -1)}
+    order = []
+    for group in (['r230', 'r231', 'r232', 'r233', 'r234', 'r235', 'r236', 'r237'],
+                  ['r238', 'r239', 'r240', 'r241', 'r242', 'r243', 'r244', 'r245']):
+        for register in group:
+            order.extend(pairs[register])
+    assert len(order) == 32
+    return order
+
+
+def derived_slot_channel():
+    """slot -> colour channel, independently of `m_enc0_model`."""
+    values = ptx_value_sequence()
+    order = ptx_slot_order()
+    channel = {}
+    for slot, value in enumerate(order):
+        if value < 0:
+            continue
+        v = values[value]
+        if v in ('r', 'g', 'b'):
+            channel[slot] = {'r': 0, 'g': 1, 'b': 2}[v]
+    return channel
+
+
+#: The map the model and the shader both carry; compared against the derivation
+#: above rather than being its source.
+SLOT_CHANNEL = derived_slot_channel()
 
 
 class FeatureSlots(unittest.TestCase):
@@ -226,6 +330,114 @@ class FeatureSlots(unittest.TestCase):
         # the remaining 17 slots are the history, the previous feature and the
         # motion-change scalar, which are exactly zero on a reset frame
         self.assertEqual(32 - len(SLOT_CHANNEL), 17)
+
+    def test_the_nonzero_slots_carry_rgb_in_ascending_order(self):
+        # the two texel-derived parts of the sequence (own colour and four
+        # candidates) are the same value on a reset frame, so the 15 nonzero
+        # slots cycle r, g, b
+        got = [SLOT_CHANNEL[s] for s in sorted(SLOT_CHANNEL)]
+        self.assertEqual(got, [0, 1, 2] * 5)
+        self.assertEqual(list(sorted(SLOT_CHANNEL)),
+                         [0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28])
+
+    def test_the_exposure_and_history_slots_are_the_zeroed_ones(self):
+        # f307 (the exposure scalar) is slot 29 and f308..f311 (the history
+        # sample) are slots 2, 3, 6, 7 - zeroed by `reset`, which is why they
+        # are the gaps in the rgb cycle
+        self.assertNotIn(2, SLOT_CHANNEL)
+        self.assertNotIn(3, SLOT_CHANNEL)
+        self.assertNotIn(6, SLOT_CHANNEL)
+        self.assertNotIn(7, SLOT_CHANNEL)
+        self.assertNotIn(29, SLOT_CHANNEL)
+
+
+# ---------------------------------------------------------------------------
+# the epilogue's channel permutation
+
+def epilogue_channel_map():
+    """Field channel -> mma column, from the eight final accumulator chains.
+
+    mma 7/8, 15/16, 23/24, 31/32 are the last k32 step of the four `n/16`
+    groups, two `g` halves each; the epilogue packs two chains into one stored
+    32-bit word, so a channel is not the column that produced it.
+    """
+    out = []
+    for plane in range(2):
+        for half in range(2):                    # channels 0..15 / 16..31
+            for j in range(4):
+                lo = plane * 32 + (0 if half == 0 else 8)
+                hi = plane * 32 + (16 if half == 0 else 24)
+                out += [lo + 2 * j, lo + 2 * j + 1, hi + 2 * j, hi + 2 * j + 1]
+    return out
+
+
+class Epilogue(unittest.TestCase):
+    def test_the_channel_map_is_a_bijection(self):
+        m = epilogue_channel_map()
+        self.assertEqual(len(m), 64)
+        self.assertEqual(sorted(m), list(range(64)))
+
+    def test_each_plane_maps_to_itself(self):
+        m = epilogue_channel_map()
+        for c in range(64):
+            self.assertEqual(m[c] // 32, c // 32)
+
+    def test_channel_zero_is_column_zero(self):
+        # the identity is *not* the mapping, but the two agree at the first
+        # column - the packing only reorders from channel 2 onward
+        m = epilogue_channel_map()
+        self.assertEqual(m[0], 0)
+        self.assertEqual(m[1], 1)
+        self.assertEqual(m[2], 16)
+        self.assertNotEqual(m[:16], list(range(16)))
+
+    def test_the_two_pi_clamp_is_the_f16_constant(self):
+        # `mov.f32 %f582, 0f40C90FDB` then `cvt.rn.f16.f32` -> 6.28125
+        self.assertEqual(float(np.float16(6.2831855)), 6.28125)
+
+
+# ---------------------------------------------------------------------------
+# the shader and the CPU oracle must not drift
+
+def shader_array(text, name, count):
+    body = text.split(name, 1)[1].split('};', 1)[0]
+    values = [v.strip().rstrip('u') for v in body.split('{', 1)[1].split(',')]
+    return [int(v) for v in values if v]
+
+
+class ShaderAgreement(unittest.TestCase):
+    """The HLSL stage and `scripts/m_enc0_model.py` share three tables.
+
+    Parsing the shader source is the only way to check them without NVIDIA data,
+    and a silent divergence between the two implementations is exactly the kind
+    of error that would survive a fixture run on one side only.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        root = os.path.dirname(HERE)
+        with open(os.path.join(root, 'src', 'native', 'enc0_cs.hlsl'),
+                  encoding='utf-8') as handle:
+            cls.shader = handle.read()
+        cls.model = __import__('m_enc0_model')
+
+    def test_the_slot_map(self):
+        got = shader_array(self.shader, 'kSlotChannel[32]', 32)
+        want = [int(c) if c >= 0 else 3 for c in self.model.SLOT_CHANNEL]
+        self.assertEqual(got, want)
+
+    def test_the_channel_permutation(self):
+        got = shader_array(self.shader, 'kColumn[64]', 64)
+        self.assertEqual(got, [int(v) for v in self.model.channel_columns()])
+        self.assertEqual(got, epilogue_channel_map())
+
+    def test_the_geometry_constants(self):
+        self.assertIn('kTokensPerRow = 480', self.shader)
+        self.assertIn('kTokenRowWords = 3840', self.shader)     # 15360 / 4
+        self.assertIn('kPlaneWords = 1044480', self.shader)     # 4177920 / 4
+        self.assertEqual(480 * 32, 15360)
+        self.assertEqual(272 * 15360, 4177920)
 
 
 if __name__ == '__main__':
