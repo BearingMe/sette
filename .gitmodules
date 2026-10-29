@@ -8,3 +8,4 @@
 	path = references/sources/dlss
 	url = https://github.com/NVIDIA/DLSS.git
 	shallow = true
+	ignore = dirty
