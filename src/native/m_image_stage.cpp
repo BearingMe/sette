@@ -88,6 +88,14 @@ const std::map<std::string, FormatInfo>& Formats() {
         // A SNORM surface has no UAV format; its bytes are written through the
         // UNORM view, which stores the same byte for the same logical value.
         {"R8G8B8A8_UNORM", {DXGI_FORMAT_R8G8B8A8_UNORM, 4, true}},
+        // The same 8-bit storage viewed as integers, so a stage can choose the
+        // quantisation itself instead of leaving it to the UNORM conversion.
+        {"R8G8B8A8_UINT", {DXGI_FORMAT_R8G8B8A8_UINT, 4, true}},
+        // ... and the same bytes again as one 32-bit integer per pixel.  This
+        // driver drops stores to an R8G8B8A8_UINT unordered-access view (a
+        // constant store never lands, while the identical store through an
+        // RGBA16F view does), so the byte surfaces are written this way.
+        {"R32_UINT", {DXGI_FORMAT_R32_UINT, 4, true}},
     };
     return table;
 }

@@ -232,6 +232,19 @@ at per-token scaling they already dominate the error.
 - [U] Whether the `mvlo` variant's weight blob is byte-identical to `mvhi`'s is
   still untested; only `mvhi` exists in this capture.
 
+## Addendum (2026-10-29, later): the front-end decode is confirmed
+
+[⇒] The doubt recorded below is **withdrawn**. [EXP-014](EXP-014-m05-dec0-mapping.md) compared
+`front_end_layout('dec0')`'s offset formula with the address arithmetic in the kernel's own PTX
+(`ld.weak.global.ca.v4.u32` at `weights + lane*16 + 512*kb` feeding two `m16n8k32` B fragments)
+and they are identical for all 64x128 elements, as a bijection of the 8 192 matrix bytes. The
+bias is one f16 per output column at 8 192, and the blob is 8 192 + 256 bytes as assumed.
+
+[⇒] EXP-013's failure had two other causes - the token plane stride (the parameter block's height
+is the padded 544, not 540) and an E4M3 subnormal decode that carried an implicit leading 1.
+Neither touches this inventory: the **counts**, the **codes** and the **layer matrices** are
+unchanged, and the two front-end matrices' values stand as decoded here.
+
 ## Addendum (2026-10-29): the front-end matrix order is not confirmed
 
 The inventory's *counts*, *codes* and *layer matrices* are unaffected, but two claims above

@@ -67,11 +67,39 @@ IMAGE_FORMATS = {
 # Per-stage binding map.  `role` is the name the shader uses; `offset` is the
 # argument slot the capture recorded the binding at, taken from the stage source
 # plus the capture's own payloads (see the stage graph finding).
+#
+# An optional fourth element overrides what a binding needs beyond its slot:
+# for a buffer, the exact byte count the stage reads (a captured pointer may land
+# inside a larger allocation); for a texture, the D3D12 view to declare when the
+# shader writes exact bytes rather than relying on the UNORM conversion.
 STAGES = {
     'downsample': {
         'shader': 'downsample_cs.cso',
         'srv': [('src', 'buffer', 24), ('colour', 'tex2d', 56)],
         'uav': [('out', 'tex2d', 32)],
+    },
+    # dec0: weights at arg 0, the token field at arg 24, then the four written
+    # surfaces.  The native shader maps one thread per token, so its dispatch is
+    # its own (like `downsample`'s per-pixel gather); the stage's output is what
+    # the fixture compares.
+    'dec0': {
+        'shader': 'dec0_cs.cso',
+        'threads': (64, 1, 1),
+        'tokens': 480 * 272,
+        # The reference's own arithmetic is approximate where it says so: the PTX
+        # uses `ex2.approx`, `rcp.approx` and `div.approx`, each specified to a
+        # couple of ULPs, and the surfaces quantise to 8 bits or f16.  So the
+        # claim is agreement on at least 99.9% of samples; byte equality is *not*
+        # claimed, and EXP-014 enumerates every residual, including the ~200
+        # covariance samples per frame that sit on an e4m3 rounding boundary and
+        # land on the other side of it.
+        'expect': {'identical_min': 0.999},
+        'srv': [('weights', 'buffer', 0, 8448),
+                ('tokens', 'buffer', 24, 8355840)],
+        'uav': [('gate', 'tex2d', 136, 'R32_UINT'),
+                ('mix', 'tex2d', 144, 'R32_UINT'),
+                ('feat', 'tex2d', 128, 'R32_UINT'),
+                ('cov', 'tex2d', 152, 'R16G16B16A16_FLOAT')],
     },
 }
 
@@ -193,6 +221,27 @@ def downsample_params(args, fields):
 PARAMS = {'downsample': downsample_params}
 
 
+def dec0_params(args, fields):
+    """dec0's parameter block, from the slots its own PTX reads.
+
+    The PTX loads `param+16` as the render size, `param+120` as the reset flag,
+    and `param+160`/`param+164` as two f32s that the epilogue uses as sigma and
+    rho.  `param+16` is (960, 544): the *padded* render height, not 540 - which is
+    what fixes the token plane stride at 272 rows (EXP-014).
+    """
+    i2 = lambda o: struct.unpack_from('<2i', args, o)
+    f1 = lambda o: struct.unpack_from('<f', args, o)[0]
+    values = {'size': list(i2(16)), 'reset': args[120],
+              'sigma': f1(160), 'rho': f1(164)}
+    blob = (struct.pack('<2i', *values['size']) + struct.pack('<2i', 0, 0)
+            + struct.pack('<2f', values['sigma'], values['rho'])
+            + struct.pack('<2i', values['reset'], 0))
+    return blob, values
+
+
+PARAMS['dec0'] = dec0_params
+
+
 def validate_stage(stage, record):
     """Reject a fixture whose geometry contradicts the stage it claims to be.
 
@@ -223,6 +272,37 @@ def validate_stage(stage, record):
             problems.append(f'grid {groups} x block {threads} does not cover {ow}x{oh}')
         if p['out2rnd'] != [0.5, 0.5]:
             problems.append(f'out2rnd {p["out2rnd"]} is not the render/output scale')
+    if stage == 'dec0':
+        p = record['params']
+        w, h = p['size']
+        plane = (h // 2) * (w // 2) * 32
+        if b['tokens']['bytes'] != 2 * plane:
+            problems.append(f'the token field is {b["tokens"]["bytes"]} B, expected '
+                            f'2*{plane} for 2 planes of {h // 2}x{w // 2} tokens')
+        if b['weights']['bytes'] != 8448:
+            problems.append(f'the weight blob is {b["weights"]["bytes"]} B, expected '
+                            f'8192 (64x128 e4m3) + 256 (128 f16 bias)')
+        if p['reset'] not in (0, 1):
+            problems.append(f'reset flag {p["reset"]} is not a boolean')
+        for role in ('feat', 'gate', 'mix', 'cov'):
+            if role not in b:
+                problems.append(f'missing output {role}')
+                continue
+            geometry = b[role]['geometry'][:2]
+            # the surfaces are the *unpadded* render rectangle; the parameter
+            # block's height is the padded one (544 for a 540-line frame)
+            if geometry[0] != w or geometry[1] > h:
+                problems.append(f'{role} is {geometry}, expected {w} wide and at most '
+                                f'{h} tall')
+        for role in ('feat', 'gate', 'mix'):
+            if role in b and b[role]['format'] != 'R32_UINT':
+                problems.append(f'{role} must be written as exact bytes through an '
+                                f'R32_UINT view, not {b[role]["format"]}')
+        groups, threads = record['groups'], record['threads']
+        tokens = (w // 2) * (h // 2)
+        if groups[0] * threads[0] < tokens:
+            problems.append(f'grid {groups} x block {threads} does not cover {tokens} '
+                            'tokens')
     return problems
 
 
@@ -242,15 +322,22 @@ def export(capture, stage, out, frame):
 
     os.makedirs(out, exist_ok=True)
     open(os.path.join(out, 'params.bin'), 'wb').write(params)
+    threads = list(spec.get('threads') or fields['threads'])
+    groups = list(spec.get('groups') or fields['groups'])
+    if spec.get('tokens'):                       # one thread per token
+        groups = [(-(-spec['tokens'] // threads[0])), 1, 1]
     lines = ['version 2', f'shader {spec["shader"]}',
-             'threads {} {} {}'.format(*fields['threads']),
-             'groups {} {} {}'.format(*fields['groups']),
+             'threads {} {} {}'.format(*threads),
+             'groups {} {} {}'.format(*groups),
              f'params params.bin {len(params)}']
     record = {
         'stage': stage, 'kernel': fields['kernel'], 'frame': frame,
         'capture_directory': directory, 'params': values, 'bindings': {},
-        'groups': fields['groups'], 'threads': fields['threads'],
+        'groups': groups, 'threads': threads,
+        'captured_groups': fields['groups'], 'captured_threads': fields['threads'],
     }
+    if spec.get('expect'):
+        record['expect'] = spec['expect']
 
     def emit_input(role, entry):
         record['bindings'][role] = entry
@@ -261,18 +348,28 @@ def export(capture, stage, out, frame):
             lines.append(f'srv tex2d {len(record["bindings"]) - 1} {entry["format"]} '
                          f'{entry["geometry"][0]} {entry["geometry"][1]} in-{role}.bin')
 
-    for role, kind, offset in spec['srv']:
+    for entry in spec['srv']:
+        role, kind, offset = entry[0], entry[1], entry[2]
         if kind == 'buffer':
+            want = entry[3] if len(entry) > 3 else None
             pointer = arg_pointer(args, offset)
-            match = [(i, a) for i, a in allocs.items() if a['base'] == pointer]
+            match = [(i, a) for i, a in allocs.items()
+                     if a['base'] <= pointer < a['base'] + a['size']]
             if not match:
                 fail(f'{role}: argument {offset} points at 0x{pointer:x}, which is not a '
                      'captured allocation')
             index, alloc = match[0]
-            data = open(alloc['pre'], 'rb').read()
+            skip = pointer - alloc['base']
+            data = open(alloc['pre'], 'rb').read()[skip:]
+            if want is not None:
+                if len(data) < want:
+                    fail(f'{role}: the allocation holds {len(data)} B from the pointer, '
+                         f'the stage reads {want}')
+                data = data[:want]
             open(os.path.join(out, f'in-{role}.bin'), 'wb').write(data)
             emit_input(role, {'kind': 'buffer', 'arg': offset, 'allocation': index,
-                              'base': hex(alloc['base']), 'bytes': len(data)})
+                              'base': hex(alloc['base']), 'offset': skip,
+                              'bytes': len(data)})
         else:
             if offset not in at:
                 fail(f'{role}: no captured image at argument offset {offset}')
@@ -285,16 +382,24 @@ def export(capture, stage, out, frame):
                 'geometry': [image['width'], image['height'], image['depth']],
                 'row_bytes': image['row_bytes'], 'bytes': image['bytes']})
 
-    for role, kind, offset in spec['uav']:
+    for entry in spec['uav']:
+        role, kind, offset = entry[0], entry[1], entry[2]
+        override = entry[3] if len(entry) > 3 else None
         if kind != 'tex2d' or offset not in at:
             fail(f'{role}: no captured output image at argument offset {offset}')
         image_id, _ = at[offset]
         image = image_record(directory, image_id)
         reference = image_record(directory, image_id, post=True)
+        declared = override or image_format(image)
+        if declared != image_format(image):
+            # an override changes the typed view, never the bytes
+            if image['width'] * image['height'] * 4 != image['bytes']:
+                fail(f'{role}: {declared} needs 4 B per pixel, the capture has '
+                     f'{image["bytes"]} B for {image["width"]}x{image["height"]}')
         open(os.path.join(out, f'ref-{role}.bin'), 'wb').write(reference['data'])
         record['bindings'][role] = {
             'kind': 'image', 'arg': offset, 'image': image_id, 'output': True,
-            'format': image_format(image), 'backing_format': hex(image['format']),
+            'format': declared, 'backing_format': hex(image['format']),
             'geometry': [image['width'], image['height'], image['depth']],
             'row_bytes': image['row_bytes'], 'bytes': image['bytes'],
             'reference': f'ref-{role}.bin',
@@ -433,7 +538,8 @@ def roundtrip(capture, out, probe, shaders):
 
 # bytes per pixel, for the spatial localisation of differences
 PIXEL_BYTES = {'R16G16B16A16_FLOAT': 8, 'R8G8B8A8_UNORM': 4, 'R32G32B32A32_FLOAT': 16,
-               'R16G16_FLOAT': 4, 'R32G32_FLOAT': 8, 'R16_FLOAT': 2, 'R32_FLOAT': 4}
+               'R8G8B8A8_UINT': 4, 'R32_UINT': 4, 'R16G16_FLOAT': 4,
+               'R32G32_FLOAT': 8, 'R16_FLOAT': 2, 'R32_FLOAT': 4}
 
 
 def compare(native, reference, role, fmt):
@@ -456,6 +562,13 @@ def compare(native, reference, role, fmt):
         peak = float(np.abs(y).max()) or 1.0
         steps = np.abs(np.frombuffer(native, np.uint16).astype(np.int64)
                        - np.frombuffer(reference, np.uint16).astype(np.int64))
+        # +0 and -0 are numerically equal but 32768 codes apart in the raw bits,
+        # so a bit-pattern ULP count would report them as the largest possible
+        # difference.  The stage writes a signed product, so the sign of a zero
+        # is not a claim about the value.
+        zero = (np.frombuffer(native, np.float16) == 0) & \
+               (np.frombuffer(reference, np.float16) == 0)
+        steps = np.where(zero, 0, steps)
         row.update({
             'nonfinite': int(x.size - finite.sum()),
             'identical_f16': float(np.mean(x == y)),
@@ -468,7 +581,7 @@ def compare(native, reference, role, fmt):
             'max_step': int(steps.max()),
             'within_one_step': float(np.mean(steps <= 1)),
         })
-    elif fmt == 'R8G8B8A8_UNORM':
+    elif fmt in ('R8G8B8A8_UNORM', 'R8G8B8A8_UINT', 'R32_UINT'):
         delta = np.abs(a.astype(np.int16) - b.astype(np.int16))
         row['max_abs_code'] = int(delta.max())
     return row
@@ -518,9 +631,26 @@ def check(fixture, results, repeat=None, json_out=None):
                 if not row['repeat_identical']:
                     problems.append(f'{role}: two runs of the same fixture differ')
         rows.append(row)
-        if not row['pass']:
-            problems.append(f'{role}: {row.get("differing_bytes")} of {len(reference)} '
-                            'bytes differ')
+        # The acceptance criterion is declared by the fixture, before the run.
+        expect = record.get('expect') or {}
+        failures = []
+        if not row.get('pass'):
+            identical = 1 - row['differing_bytes'] / max(row['bytes'], 1)
+            if 'identical_f16' in row:
+                identical = row['identical_f16']
+            if identical < expect.get('identical_min', 1.0):
+                failures.append(f'{100 * identical:.4f}% identical, expected at least '
+                                f'{100 * expect["identical_min"]:.4f}%')
+            if expect.get('max_ulp') is not None and 'max_step' in row:
+                if row['max_step'] > expect['max_ulp']:
+                    failures.append(f'max {row["max_step"]} ULP, expected at most '
+                                    f'{expect["max_ulp"]}')
+            if not failures:
+                row['within_declared_bound'] = True
+        for failure in failures:
+            problems.append(f'{row["role"]}: {failure}')
+        if failures:
+            row['declared_bound_failed'] = failures
 
     for row in rows:
         identical = 100 * (1 - row['differing_bytes'] / row['bytes'])

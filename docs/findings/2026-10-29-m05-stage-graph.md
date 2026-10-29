@@ -158,6 +158,24 @@ captured surface byte for byte
 ([EXP-012](../experiments/EXP-012-m05-native-downsample.md)), so this is a measured layout
 rather than a reading of `down_m.comp`.
 
+## Addendum (2026-10-29, later): `dec0`'s operands, from the kernel's own PTX
+
+[S] [EXP-014](../experiments/EXP-014-m05-dec0-mapping.md) reads the address arithmetic of
+`rrlite_dec0_4x4_folded` directly and fixes what this finding previously described only from
+d4r's sources:
+
+- the token field is **two planes of 32 channels**, 32 contiguous bytes per token, 480 tokens
+  per row, **272 rows per plane** (the parameter block's height is the *padded* 544), so a plane
+  is 4 177 920 bytes and the field 8 355 840 - exactly what `dec1` writes;
+- the expansion matrix is the blocked layout this finding lists as 8 192 E4M3 bytes, and the
+  PTX's offset formula is identical to `m_weights.layout_offsets`; the bias is one f16 per
+  output column at 8 192;
+- the four surfaces are written from 20 columns per 2x2 sub-position, `s*32 + 0..19`, with d4r's
+  `v0..v4` value order.
+
+[M] With that mapping the stage is reproduced natively at 99.9991% / 99.9348% / 99.9787% /
+99.9883% byte agreement on the four surfaces.
+
 ## Variant handling (B2/C17)
 
 [S] `scripts/m_weights.py` parses kernel names into explicit fields -

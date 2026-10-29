@@ -37,7 +37,8 @@ set(SHADERS
     "gemm_f16_cs.hlsl|main|gemm_f16_cs.cso"
     "image_copy_cs.hlsl|CopyTex|image_copy_tex.cso"
     "image_copy_cs.hlsl|CopyBuf|image_copy_buf.cso"
-    "downsample_cs.hlsl|main|downsample_cs.cso")
+    "downsample_cs.hlsl|main|downsample_cs.cso"
+    "dec0_cs.hlsl|main|dec0_cs.cso")
 
 set(SHADER_OUTPUTS)
 foreach(entry IN LISTS SHADERS)

@@ -5,6 +5,28 @@
 **Depends on:** [EXP-010](EXP-010-m05-native-fp16-stage.md) (the step chain), [EXP-011](EXP-011-m05-image-capture.md)
 (the four captured surfaces), [EXP-012](EXP-012-m05-native-downsample.md) (the native image-stage path)
 
+## Addendum (2026-10-29): the blocker is resolved
+
+**Status:** the question below is answered; see [EXP-014](EXP-014-m05-dec0-mapping.md). This
+report is kept as the record of the failed attempt.
+
+[⇒] The failure was **not** in the matrix decode. `m_weights.layout_offsets('dec0')` is identical,
+element for element, to the address formula in the kernel's own PTX (all 64x128 elements), and
+the `live` column permutation (`s*32 + 0..19`, values `v0..v4`) is d4r's and correct. Two other
+things were wrong:
+
+1. [M] `param+16` is the **padded** render size, `(960, 544)` - the captured `args.bin` reads
+   `0x220` = 544, not 540. The token plane is therefore 272 rows and 4 177 920 bytes, not 270
+   rows and 4 147 200. The two-row shift put the second channel plane in the wrong place.
+2. [M] The E4M3 **subnormal** decode needs no implicit leading 1: the value is `m * 2^-9`, not
+   `(1 + m/8) * 2^-6`. 17 of the 64 weights of column 0 are subnormal codes, so this inflated a
+   quarter of every product by up to 8x.
+
+[M] With both corrected, the same binary reproduces the four surfaces at 99.9991% / 99.9348% /
+99.9787% / 99.9883% and the native D3D12 stage matches. [⇒] The "next" list below is complete:
+the blob search it proposed was unnecessary, because the mapping was already correct and the
+operand was not.
+
 ## Question
 
 `dec0` expands the last decoder's 64-channel E4M3 token field to 20 values per (token, 2x2

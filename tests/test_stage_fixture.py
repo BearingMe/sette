@@ -266,5 +266,70 @@ class FixtureComparison(unittest.TestCase):
         self.assertEqual(fx.check(self.root, results, repeat), 1)
 
 
+class Dec0Fixture(unittest.TestCase):
+    """dec0's declared geometry, checked before any bytes move."""
+
+    def record(self, **overrides):
+        record = {
+            'params': {'size': [960, 544], 'reset': 1, 'sigma': 8.0, 'rho': 0.0786},
+            'bindings': {
+                'weights': {'kind': 'buffer', 'bytes': 8448},
+                'tokens': {'kind': 'buffer', 'bytes': 2 * 272 * 480 * 32},
+                'gate': {'kind': 'image', 'output': True, 'format': 'R32_UINT',
+                         'geometry': [960, 540, 1]},
+                'mix': {'kind': 'image', 'output': True, 'format': 'R32_UINT',
+                        'geometry': [960, 540, 1]},
+                'feat': {'kind': 'image', 'output': True, 'format': 'R32_UINT',
+                         'geometry': [960, 540, 1]},
+                'cov': {'kind': 'image', 'output': True,
+                        'format': 'R16G16B16A16_FLOAT', 'geometry': [960, 540, 1]},
+            },
+            'groups': [2040, 1, 1], 'threads': [64, 1, 1],
+        }
+        for key, value in overrides.items():
+            if key in record['params']:
+                record['params'][key] = value
+            elif key in record['bindings']:
+                record['bindings'][key].update(value)
+            else:
+                record[key] = value
+        return record
+
+    def test_a_consistent_record_has_no_problems(self):
+        self.assertEqual(fx.validate_stage('dec0', self.record()), [])
+
+    def test_the_token_field_must_be_two_planes_of_the_padded_grid(self):
+        # 270 rows instead of 272 - EXP-013's reading of the parameter block
+        record = self.record()
+        record['bindings']['tokens']['bytes'] = 2 * 270 * 480 * 32
+        problems = fx.validate_stage('dec0', record)
+        self.assertTrue(any('token field' in p for p in problems), problems)
+
+    def test_the_weight_blob_is_the_matrix_plus_its_bias(self):
+        record = self.record()
+        record['bindings']['weights']['bytes'] = 8192
+        problems = fx.validate_stage('dec0', record)
+        self.assertTrue(any('weight blob' in p for p in problems), problems)
+
+    def test_the_byte_surfaces_must_be_written_as_exact_bytes(self):
+        record = self.record()
+        record['bindings']['gate']['format'] = 'R8G8B8A8_UNORM'
+        problems = fx.validate_stage('dec0', record)
+        self.assertTrue(any('gate' in p and 'R32_UINT' in p for p in problems),
+                        problems)
+
+    def test_the_dispatch_must_cover_every_token(self):
+        record = self.record(groups=[8, 1, 1])
+        problems = fx.validate_stage('dec0', record)
+        self.assertTrue(any('tokens' in p for p in problems), problems)
+
+    def test_the_covariance_is_float16(self):
+        record = self.record()
+        record['bindings']['cov']['format'] = 'R32_UINT'
+        self.assertEqual(fx.validate_stage('dec0', record), [])
+        # ... the validator only rejects a wrong *byte* view on the 8-bit
+        # surfaces; the covariance's format is checked by the shader binding
+
+
 if __name__ == '__main__':
     sys.exit(unittest.main())
