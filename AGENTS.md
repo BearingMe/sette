@@ -356,10 +356,47 @@ Do not overwrite unrelated user changes.
 
 Do not claim success based on expected rather than observed results.
 
-Do not create commits unless requested or authorized
-by the project's workflow.
 
-## 12. Guiding Principle
+## 12. Commit Conventions
+
+All commits must follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+Format:
+
+`type(scope): description`
+
+The scope is optional.
+
+Common types:
+
+- `feat`: New functionality.
+- `fix`: Bug fixes.
+- `refactor`: Code changes without behavior changes.
+- `perf`: Performance improvements.
+- `test`: Tests and validation.
+- `docs`: Documentation.
+- `build`: Build system or dependencies.
+- `ci`: Continuous integration.
+- `chore`: Other maintenance.
+
+Rules:
+
+1. Use lowercase types and imperative descriptions.
+2. Keep commit messages concise and specific.
+3. Use `!` or a `BREAKING CHANGE:` footer for breaking changes.
+4. Do not combine unrelated changes in one commit.
+5. Do not create commits unless requested or explicitly authorized by the project's workflow.
+
+Examples:
+
+- `feat(probe): add INT8 matrix multiplication experiment`
+- `fix(kernel): correct tensor stride calculation`
+- `perf(wmma): reduce register pressure`
+- `docs(findings): document quantization limitations`
+- `test(inference): add FP16 differential comparisons`
+
+
+## 13. Guiding Principle
 
 **Investigate → Establish evidence → Reconstruct → Validate.**
 
