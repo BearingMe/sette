@@ -240,7 +240,7 @@ Establish a deterministic reference execution path.
 - [x] B1 (C16): Capture completeness audit — 14 launches, 14/14 buffer edges confirmed by byte-identical tensor content, arena map established, and the image-bound stages identified as uncaptured ([stage graph](../findings/2026-10-29-m05-stage-graph.md)). Extended by the image capture below: every texture and surface those stages bind is now dumped, so the audit covers both resource kinds ([EXP-011](experiments/EXP-011-m05-image-capture.md)).
 - [x] B2 (C17): Explicit variant support — `m_weights.parse_kernel()` keeps `motion`/`range`/`folded` as separate fields, tests pin the grammar, and static PTX evidence shows `mvlo`/`mvhi` share the weight-block geometry but not their code ([stage graph](../findings/2026-10-29-m05-stage-graph.md)).
 - [x] B3 (C18): Windows execution foundation — D3D12 compute path in `src/native/` with DXC compilation, typed-buffer descriptor tables, upload/readback heaps, one fence, and error reporting; one real stage dispatches and reads back ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)).
-- [ ] B4 (C19): Input/output stage reconstruction - **in progress**. B4.1 (fixture
+- [x] B4 (C19): Input/output stage reconstruction - **done**. B4.1 (fixture
   infrastructure), B4.2 (native `downsample`) and B4.3 (native `dec0`) are done. A captured
   launch executes from its own recorded formats, geometry, pitch, parameter block and dispatch,
   a representative set of 8 captured resources round-trips through D3D12 unchanged, native
@@ -273,9 +273,15 @@ Establish a deterministic reference execution path.
   `dec0` pixels becomes 0.064% of the final frame's samples at a median of 1 f16 ULP, while
   the same chain from captured inputs stays byte-exact. Acceptance floors for the FP16 oracle
   (per surface and end to end, plus three structural invariants) are executable in
-  `scripts/m_conformance.py`, [EXP-017](experiments/EXP-017-m05-dec0-fidelity.md). The
-  remaining work is B4.7 (the shared comparison suite, partly in place). The history branch
-  of `dec0` (frames with `reset = 0`) and of `post` is not implemented.
+  `scripts/m_conformance.py`, [EXP-017](experiments/EXP-017-m05-dec0-fidelity.md). B4.7 (the
+  regression gate) is **done**: one command runs all four stages, requires every declared
+  output at its declared size (a missing, short or undeclared comparison fails instead of
+  skipping), rebuilds the `dec0 -> post -> downsample` chain, and applies the criteria -
+  reproducibly, 99.9369% of the final frame at max 7 ULP,
+  [EXP-018](experiments/EXP-018-m05-regression-gate.md). The gate also runs each stage twice: on its
+  first run that check found `post` was non-deterministic (one block, at pixels whose
+  out-of-bounds motion fetch perturbed the dispatch), which is fixed. The history branch of
+  `dec0` (frames with `reset = 0`) and of `post` is not implemented.
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).

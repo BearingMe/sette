@@ -103,6 +103,12 @@ references:
 | `downsample` | captured packed buffer | **100.0000%** of the final 1920x1080 frame |
 | `downsample` | native packed buffer | 99.9364% of the frame (5278 of 8 294 400 f16 samples) |
 
+*Correction (EXP-018):* this row was first measured with an ad-hoc harness.  The
+regression gate rebuilds the whole chain from scratch on every run and reproducibly
+reports **99.9369%, 5237 of 8 294 400 samples**, max 7 ULP and mean -0.193 ULP; the
+gate's figure is the one to quote and the ad-hoc harness is not retained.  The
+conclusion is unchanged.
+
 The last row is the answer: **`dec0`'s 0.23% of pixels becomes 0.064% of the final
 frame's samples, with a median difference of 1 f16 ULP and a maximum of 7** (a
 full f16 code at values around 0.25-1.0).  The signed mean over the differing
