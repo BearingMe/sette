@@ -33,7 +33,7 @@ Evidence tags follow `docs/CONVENTIONS.md`: `[D]` documentation, `[S]` source ob
 
 **Out of scope:** Other DLSS presets, Ray Reconstruction, Frame Generation, FSR, NGX/DXGI interception, game-specific integration, unrelated GPU architectures, and a generalized ML framework.
 
-The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) is complete. Phase II has started: M05 (FP16 oracle reproduction) is blocked on a captured Preset M weight upload; see [EXP-002](docs/experiments/EXP-002-m05-oracle-blocker.md). M06–M08 have not started.
+The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) is complete. Phase II has started: M05's full-network oracle is blocked because `enc0`/`dec0`/reconstruction weights are not captured, but a real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)). M06–M08 have not started.
 
 ## Trace research workflow
 

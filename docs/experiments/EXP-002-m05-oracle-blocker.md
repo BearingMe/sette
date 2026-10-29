@@ -46,6 +46,10 @@ To resume M05, in order:
 
 Risks: NGX may refuse the AMD adapter, the 310.7 feature DLL may not match the probe/core, and the capture may miss weight allocations. Captures and weights are NVIDIA-derived, must stay local, and must never be committed.
 
+## Addendum (2026-10-29)
+
+The probe/capture route in **Next** steps 1-4 was executed with a minimal Windows build. [EXP-003](EXP-003-m05-layer-capture.md) records the result: preset 13 runs on gfx1101 with both the local 310.7.0 DLL and 310.9.1, ten real-weight layer captures were produced, and all ten replay bit-exactly against the captured GPU outputs. The remaining M05 blocker is narrower: the Windows ZLUDA replay hook is whitelisted to the ten layer kernels and does not capture `enc0`, `dec0`, `post`, or `downsample`, so a complete `compile_m.py` model and a full-frame oracle still cannot be built. The full-network gate remains BLOCKED.
+
 ## Files
 
 - d4r Windows branch: `origin/windows` at `7da2f9a` (temporary clone, not part of this repository).

@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started: M05 (FP16 oracle reproduction) is blocked because no Preset M weight upload has been captured, and neither d4r's Linux path nor its Windows branch nor the public Windows release supplies one; the Windows branch build/capture route and its open risks are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md). M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's full-network gate is blocked because the Windows capture hook omits `enc0`/`dec0`/reconstruction weights ([EXP-002](experiments/EXP-002-m05-oracle-blocker.md)), but a real-weight layer oracle is established: ten Preset M layers captured from the pinned DLL replay bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -195,7 +195,7 @@ Understand the numerical behavior of the reference implementation.
 
 **Status:** BLOCKED / BLOCKED
 
-**Blocker:** No Preset M weight upload has been captured. d4r's Windows branch provides a native engine, a D3D12 DLSS probe, and M capture-validation scripts, but it explicitly requires a real captured NGX upload, and the public Windows release contains no weights or capture. The build/capture route and its risks are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md). No substitute oracle was derived from the reconstruction under test.
+**Blocker:** The full-network oracle still needs `enc0`, `dec0`, and reconstruction weights. The Windows ZLUDA capture hook is whitelisted to the ten `rrlite_*_4x4` layer kernels and does not dump those stages, so `compile_m.py` cannot build a complete model from this capture. A layer-level oracle is established: ten real-weight layers were captured from the pinned DLL and replayed bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and the remaining capture options are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Objective
 
@@ -204,19 +204,21 @@ Establish a deterministic reference execution path.
 ### Checkpoints
 
 - [ ] C01: Build or execute d4r's relevant standalone engine.
-- [ ] C02: Pin the model and source revision.
+- [x] C02: Pin the model and source revision (d4r `05e19d4`; Windows capture tooling `7da2f9a`; local DLL 310.7.0).
 - [ ] C03: Establish one fixed output resolution and quality setting supported by the reference path.
-- [ ] C04: Prepare deterministic inputs.
-- [ ] C05: Capture final outputs.
-- [ ] C06: Capture intermediate tensors where accessible.
-- [ ] C07: Establish repeatability and tolerance requirements.
-- [ ] C08: Identify nondeterministic behavior, if any.
+- [x] C04: Prepare deterministic inputs (captured layer inputs; fixed 256x144 probe frame).
+- [x] C05: Capture final outputs (ten layer outputs, `gpu-output/`; frame `output-0.rgba16f`).
+- [x] C06: Capture intermediate tensors where accessible (layer inputs, weights, and outputs).
+- [x] C07: Establish repeatability and tolerance requirements (two native replays byte-identical; exact tolerance).
+- [x] C08: Identify nondeterministic behavior, if any (none observed at layer scope).
 
 ### Validation Gate
 
 Reference execution is reproducible, and captured outputs are suitable for differential testing with repeatability/tolerance criteria recorded.
 
-**Validation is BLOCKED:** no reference execution or captured output exists. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
+
+**Full-network gate: BLOCKED** — `enc0`/`dec0`/reconstruction weights are not captured, so no complete model or full-frame oracle exists. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
