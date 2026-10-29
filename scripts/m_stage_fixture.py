@@ -101,6 +101,24 @@ STAGES = {
                 ('feat', 'tex2d', 128, 'R32_UINT'),
                 ('cov', 'tex2d', 152, 'R16G16B16A16_FLOAT')],
     },
+    # enc0: the weight blob at arg 0, the colour texture at arg 80, and the token
+    # field at arg 48 - which the kernel writes with `st.global`, so it is a
+    # buffer, not a surface.  One thread per token (480 x 272), not the captured
+    # 121 x 69 x 32: the captured grid is 8x8 pixels per block with two passes,
+    # and the stage's output is what the fixture compares.
+    #
+    # The field is E4M3 bytes compared byte for byte.  The CPU oracle reproduces
+    # all 8 355 840 of them (EXP-015), so the criterion is exactness, declared
+    # here before the run.
+    'enc0': {
+        'shader': 'enc0_cs.cso',
+        'threads': (64, 1, 1),
+        'tokens': 480 * 272,
+        'expect': {'identical_min': 1.0},
+        'srv': [('weights', 'buffer', 0, 12416),
+                ('colour', 'tex2d', 80)],
+        'uav': [('tokens', 'buffer', 48, 8355840)],
+    },
 }
 
 
@@ -242,6 +260,29 @@ def dec0_params(args, fields):
 PARAMS['dec0'] = dec0_params
 
 
+def enc0_params(args, fields):
+    """enc0's parameter block, from the slots its own PTX reads.
+
+    `param+16` is the *padded* size (960, 544) that the store uses for its row
+    and plane strides, `param+56` is the visible size (960, 540) the mirror
+    folds against, and `param+312`/`+316` are the dither table's frame index and
+    the reset flag.  Both sizes are needed because they differ - using the
+    visible height for the plane shifted dec0's channels 32..63 by two rows
+    (EXP-013).
+    """
+    i2 = lambda o: list(struct.unpack_from('<2i', args, o))
+    values = {'padded': i2(16), 'visible': i2(56),
+              'frame': struct.unpack_from('<I', args, 312)[0],
+              'reset': args[316]}
+    blob = (struct.pack('<2i', *values['visible'])
+            + struct.pack('<2i', *values['padded'])
+            + struct.pack('<2I', values['frame'], values['reset']))
+    return blob, values
+
+
+PARAMS['enc0'] = enc0_params
+
+
 def validate_stage(stage, record):
     """Reject a fixture whose geometry contradicts the stage it claims to be.
 
@@ -300,6 +341,32 @@ def validate_stage(stage, record):
                                 f'R32_UINT view, not {b[role]["format"]}')
         groups, threads = record['groups'], record['threads']
         tokens = (w // 2) * (h // 2)
+        if groups[0] * threads[0] < tokens:
+            problems.append(f'grid {groups} x block {threads} does not cover {tokens} '
+                            'tokens')
+    if stage == 'enc0':
+        p = record['params']
+        pw, ph = p['padded']
+        vw, vh = p['visible']
+        plane = (ph // 2) * (pw // 2) * 32
+        if b['weights']['bytes'] != 12416:
+            problems.append(f'the weight blob is {b["weights"]["bytes"]} B, expected '
+                            f'12416 = 4096 (dither) + 8192 (128x64 e4m3) + 128 (bias)')
+        if b['tokens']['bytes'] != 2 * plane:
+            problems.append(f'the token field is {b["tokens"]["bytes"]} B, expected '
+                            f'2*{plane} for 2 planes of {ph // 2}x{pw // 2} tokens '
+                            f'from the padded height')
+        if b['colour']['geometry'][:2] != [vw, vh]:
+            problems.append(f'the colour texture is {b["colour"]["geometry"][:2]}, '
+                            f'not the visible size {[vw, vh]}')
+        if p['reset'] != 1:
+            problems.append(f'reset is {p["reset"]}: the native shader implements the '
+                            'reset frame only, where the history, previous-feature and '
+                            'exposure slots are provably zero')
+        if p['frame'] > 7:
+            problems.append(f'frame {p["frame"]} is outside the 8-frame dither table')
+        groups, threads = record['groups'], record['threads']
+        tokens = (ph // 2) * (pw // 2)
         if groups[0] * threads[0] < tokens:
             problems.append(f'grid {groups} x block {threads} does not cover {tokens} '
                             'tokens')
@@ -385,6 +452,40 @@ def export(capture, stage, out, frame):
     for entry in spec['uav']:
         role, kind, offset = entry[0], entry[1], entry[2]
         override = entry[3] if len(entry) > 3 else None
+        if kind == 'buffer':
+            # a `st.global` output: the pointer resolves into a captured
+            # allocation, and the reference is that allocation's post-launch
+            # image from the same offset
+            want = entry[3] if len(entry) > 3 else None
+            pointer = arg_pointer(args, offset)
+            match = [(i, a) for i, a in allocs.items()
+                     if a['base'] <= pointer < a['base'] + a['size']]
+            if not match:
+                fail(f'{role}: argument {offset} points at 0x{pointer:x}, which is '
+                     'not a captured allocation')
+            index, alloc = match[0]
+            if not alloc['post']:
+                fail(f'{role}: allocation {index} has no post-launch image to compare '
+                     'against')
+            skip = pointer - alloc['base']
+            before = open(alloc['pre'], 'rb').read()[skip:]
+            after = open(alloc['post'], 'rb').read()[skip:]
+            length = want if want is not None else len(after)
+            if len(after) < length:
+                fail(f'{role}: the allocation holds {len(after)} B from the pointer, '
+                     f'the stage writes {length}')
+            open(os.path.join(out, f'ref-{role}.bin'), 'wb').write(after[:length])
+            record['bindings'][role] = {
+                'kind': 'buffer', 'arg': offset, 'allocation': index,
+                'base': hex(alloc['base']), 'offset': skip, 'output': True,
+                'format': 'R8_UINT', 'geometry': [length, 1, 1],
+                'bytes': length, 'reference': f'ref-{role}.bin',
+                'changed_bytes': int(np.count_nonzero(
+                    np.frombuffer(before[:length], np.uint8)
+                    != np.frombuffer(after[:length], np.uint8)))}
+            lines.append(f'uav buffer {len(record["bindings"]) - 1} out-{role}.bin '
+                         f'{length}')
+            continue
         if kind != 'tex2d' or offset not in at:
             fail(f'{role}: no captured output image at argument offset {offset}')
         image_id, _ = at[offset]
