@@ -112,6 +112,30 @@ resolution rather than the 512x288 convenience size.
 - Capture workspaces stay under the temp directory; no capture data is
   committed (weights are NVIDIA's).
 
+## Addendum (2026-10-29): the two harness defects, diagnosed
+
+1. **"Capture filename collision" is really a default limit.** [S] The hook
+   names each dump `replay-{sequence:06}-{kernel}` where `sequence` counts
+   launches *per kernel name*, and returns early once that count reaches
+   `D4R_CUDA_REPLAY_DUMP_LIMIT`, which defaults to **1**.  Six tube launches
+   therefore produce one directory, and different kernels legitimately share
+   `replay-000001` because their names differ.  Every complete capture in this
+   project uses `D4R_CUDA_REPLAY_DUMP_LIMIT=40`; the earlier 1080p frame is kept
+   as-is and is not treated as evidence for the tube blocks.
+   (`zluda/src/impl/d4r_replay.rs`, `begin()`.)
+
+2. **`prepare-zluda-source.ps1` aborts under PowerShell 5.1.** [M] The script
+   sets `$ErrorActionPreference = 'Stop'`, and PowerShell 5.1 turns a *native*
+   command's stderr output into a terminating `NativeCommandError` - git writes
+   ordinary progress there ("Switched to a new branch", patch statistics), so
+   the script died before its own `$LASTEXITCODE` checks could run.  [M] Fixed
+   by routing the native calls through a helper that relaxes the preference only
+   around the invocation, keeps `$LASTEXITCODE` authoritative, and throws with
+   the captured output on a non-zero exit.  Verified in PowerShell 5.1 both
+   ways: stderr with exit 0 no longer terminates, and exit 3 still throws
+   (`cmd /c ... failed (exit 3)`).  The build that produced this capture used
+   the manual patch sequence before the fix; the fix changes no build product.
+
 ## References
 
 - [Coverage audit](../findings/2026-10-29-m05-capture-coverage.md)
