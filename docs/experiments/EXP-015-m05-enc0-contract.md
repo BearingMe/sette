@@ -1,8 +1,11 @@
 # EXP-015: `enc0`'s Resource Contract, Blob Layout and Feature Structure (M05 B4.4, E1-E7)
 
 **Milestone:** M05 (checkpoint B4.4/C19)
-**Status:** IN PROGRESS / PENDING — E1, E3 and the E6 edge are PASS; E2 is partly
-established; E4 does **not** reproduce the reference and E5 was not attempted.
+**Status:** **PASS** — completed by the addendum at the end of this report, which
+resolves the E4 failure below: the CPU oracle and the native D3D12 stage both
+reproduce the captured token field byte for byte (8 355 840 / 8 355 840).
+Sections 1-8 are the original investigation and are preserved unchanged; §9
+records what was wrong and how it was established.
 **Depends on:** [EXP-011](EXP-011-m05-image-capture.md) (the captured resources),
 [EXP-014](EXP-014-m05-dec0-mapping.md) (the method), [EXP-009](EXP-009-m07-complete-inventory.md)
 
@@ -242,3 +245,195 @@ does *not* say anything about the reconstruction's fidelity, which is E4's failu
   (d4r `05e19d4`) - the same 32 slots and the `ENC0_DISPLAY_MV` note
 - [EXP-011](EXP-011-m05-image-capture.md), [EXP-014](EXP-014-m05-dec0-mapping.md),
   [EXP-009](EXP-009-m07-complete-inventory.md)
+
+---
+
+# Addendum (same milestone, same capture): the E4 failure resolved, E2/E5/E6/E7 closed
+
+Baseline `4bd0bcd`. Everything below is measured on the canonical capture
+(`replay-000001-rrlite_enc0_4x4_mvhi_ldr_folded`, frame 1, `reset = 1`) against
+`gpu-output/alloc-1.bin` at the launch's own output pointer.
+
+**Correction to §7 of the original text.** The script's docstring claimed the model produced
+"exactly as many distinct token vectors as the capture (24)". The measured run produced **12**
+distinct vectors. The docstring was wrong; the number in this report was right. The corrected
+model now produces 24 and every one of them equals a captured vector.
+
+## 1. The dither transcription error (F1): confirmed, and it was real
+
+The original §E3 formula was right and the code did not implement it. The PTX is
+(`dlss-0154-00.ptx` 824-855, and eight more copies of the same block):
+
+```
+and.b32   %r229, %r225, -67044352   // 0xFC00FC00: the exponent of h
+or.b32    %r226, %r251, %r229       // (e | n)
+add.f16x2 %r224, %r225, %r226       // h + (e|n)      <- %r225 is h
+sub.f16x2 %r227, %r224, %r229       // - e
+and.b32   %r245, %r227, -8323200    // 0xFF80FF80
+```
+
+`%r225` is `mov.b32 {%rs62, %rs63}` where both halves are `cvt.rn.f16.f32` of the clamped feature
+value. The model had `base` (the exponent-only value) in that slot, so it computed
+`f16(e + (e|n)) - e` instead of `f16(h + (e|n)) - e` and every value in an exponent bin collapsed
+onto the same dither result. The masks in the PTX are exactly `0xFC00FC00` and `0xFF80FF80`
+(-67044352 and -8323200 as PTX prints them), which is what pins the register roles: only the
+`and 0xFF80…` keeps a sign-preserving truncation, and the `add` must carry the mantissa or the
+mask has nothing to truncate.
+
+Measured effect in isolation, with the slot map and channel order still wrong:
+
+| dither | byte agreement | distinct vectors | value range |
+|---|---|---|---|
+| `e` in the add (before) | 1.3158% | 12 | [-0.938, 1.625] |
+| `h` in the add (after) | 0.9784% | **24** | [-1.625, 2.250] |
+
+The byte agreement *fell*. The distinct-vector count reached the reference's 24, which was the
+first evidence that and the value range was still wrong for a second reason: the slot map.
+
+## 2. The feature slots (F2/F3): 15 positions were right, 8 channel assignments were not
+
+The original §E2 took d4r's 32-slot map on trust. The PTX's own derivation, in three steps:
+
+**(a) The 20 values per pixel.** `f292..f311` are selected from clamped floats: `f292..f294` are
+the pixel's own texel, `f295..f306` are the four motion candidates' RGB (`f679..f690`, which on
+this frame are four more point-samples of the *same* texel at `{r92,r93}` - the LDR/reset branch
+of the candidate loop), `f307` is `f337` (the motion-change scalar) and `f308..f311` are the
+history RGBA (`f691..f694`).
+
+**(b) Which are zero on a reset frame.** `rs237` carries `reset` on this path (`ld.param.u8
+%rs237, [%rd1+308]` at 350), so `p55 = (rs237 != 0)` and `p63 = (rs234 == 0)` are both decided by
+it: the history slots become 0 (`f691..f694 = 0` at 365-369) and `f337` becomes 0 (line 424).
+Exactly 15 of the 20 survive.
+
+**(c) The physical order.** The two `st.shared.v4.u32` stores pack the dither results two per
+32-bit word:
+
+```
+[r256]      = {r230,r231} {r232,r233} {r234,r235} {r236,r237}
+[r256+1024] = {r238,r239} {r240,r241} {r242,r243} {r244,r245}
+```
+
+with `r230..r245` coming from `(f292,f293) (f308,f309) (f294,f295) (f310,f311) (f296,f297) (0,0)
+(f298,f299) (0,0) (f300,f301) … (f306,f307) (0,0)`. Applying that packing to (a) gives the slot
+map, and because `f292..f306` cycle r,g,b, the 15 nonzero slots cycle r,g,b in ascending slot
+order:
+
+```
+slot  0  1  4  5  8  9 12 13 16 17 20 21 24 25 28
+ch    r  g  b  r  g  b  r  g  b  r  g  b  r  g  b
+```
+
+The *positions* agree with d4r's map. The *channels* do not: d4r assigns slot 8 = r where this
+kernel has g, slot 12 = g where this has r, and so on for 8 of the 15. That difference is why
+the model could produce 24 plausible vectors and match none of them.
+
+**The shared-memory "transpose" is a no-op.** The eight `ld.shared` pairs at 1784-1881 are
+re-stored at 1909-1964 to the *same* addresses: the load and store address blocks are the same
+expression (`r940 = lane>>2`, `r941 = lane&3`, `r942 = r940&3`, …) with the store's copy reading
+`r420 = %laneid` instead of `r419`. Emulating the address block for all 32 lanes confirms
+`store_word(i) == load_word(i)` for every i. So the mma reads exactly what the pixel wrote, and
+the k order follows from the read addresses:
+
+| k | pixel | field token |
+|---|---|---|
+| 0-31 | `p` | `(2 ty, 2 tx)` |
+| 32-63 | `p+1` | `(2 ty, 2 tx+1)` |
+| 64-95 | `p+8` | `(2 ty+1, 2 tx)` |
+| 96-127 | `p+9` | `(2 ty+1, 2 tx+1)` |
+
+and `k = slot index`, with slots 0-15 the first shared-memory plane and 16-31 the second. The
+k-quarter order is the natural 2x2 one, which the earlier exhaustive search had already
+confirmed was not the problem.
+
+## 3. The epilogue's channel permutation (the last 87%)
+
+`mma 7, 8, 15, 16, 23, 24, 31, 32` are the four-k32-step chains' final accumulators - eight
+chains of eight columns. The epilogue clamps each to `+-2*pi` (`max.f16x2`/`min.f16x2` with
+`0f40C90FDB`, whose f16 value is 6.28125), converts with `cvt.rn.satfinite.e4m3x2`, and packs
+*two chains into one stored word*:
+
+```
+word at byte 4j        <- chain (n/16=0, g=0) columns 2j, 2j+1, then chain (n/16=1, g=0)
+word at byte 16+4j     <- chain (n/16=0, g=1), then chain (n/16=1, g=1)
+```
+
+so field channel `c` is not mma column `c`:
+
+```
+c:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+n:  0  1 16 17  2  3 18 19  4  5 20 21  6  7 22 23
+c: 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+n:  8  9 24 25 10 11 26 27 12 13 28 29 14 15 30 31
+```
+
+(and the same shifted by 32 in the second plane). A bijection of 0..63 that preserves the plane,
+*not* the identity - the model's "column n is channel n" was wrong for 62 of the 64 channels.
+
+## 4. `param+268` and `param+272` (F4): both are motion-only, both are inert on this frame
+
+| parameter | value | only use | reaches |
+|---|---|---|---|
+| +268 | 9.045065 | 203: `f222 = f9 * 540.0`, then 204: `f31 = f222 / 540.0` (f29 is `cvt.rn.f32.u32` of the visible height, 540) | multiplies the previous-motion residual at 205-208 |
+| +272 | 0.2235685 | 259: `f52 = f659 * 0.6931472 * log2(f678)` | the motion-change scalar |
+
+They compose into one quantity: `f31 = 9.045065` (the 540s cancel),
+`f32 = |9.045065 * dmv|^2`, `f678 = 1 + sqrt(f32)`, `f52 = 0.2235685 * ln(f678)`, and `f52` is
+then `selp`-ed against zero by `p63` (line 424). `f52` has exactly one consumer: the slot-29
+feature. On a reset frame `p63` is false, the slot is zero, and neither constant can affect the
+output - which the byte-exact reproduction below confirms empirically.
+
+## 5. Result: E4 and E5, byte for byte
+
+CPU oracle (`scripts/m_enc0_model.py`, rewritten from the above):
+
+| metric | before | after |
+|---|---|---|
+| identical bytes | 1.3158% | **100.0000%** (8 355 840 / 8 355 840) |
+| fully identical tokens | 0.0000% | **100.0000%** (130 560 / 130 560) |
+| distinct token vectors | 12 | **24** (the reference's 24) |
+| value range | [-0.938, 1.625] | **[-1.000, 1.375]** |
+| per-plane agreement | - | 100% / 100% |
+
+Native D3D12 (`src/native/enc0_cs.hlsl`, fixture `fixtures/enc0`, RX 7700 XT gfx1101):
+
+| comparison | result |
+|---|---|
+| native vs captured field | **100.0000%** (0 differing bytes of 8 355 840) |
+| native vs the CPU oracle | **100.0000%** |
+| native vs `enc1`'s captured input | **100.0000%** (0 of 8 355 840) |
+| run 1 vs run 2 | **0 bytes differ** |
+| per-plane / per-token | 100% / 100% |
+| `m_stage_fixture.py check` | 0 problems, `identical_min = 1.0` met |
+
+The `expect.identical_min = 1.0` was declared in the stage's fixture map before the run, so the
+criterion was not chosen after seeing the result. Note that both comparisons in the last row are
+distinct claims: the captured `enc0` output equals `enc1`'s input because that is the established
+edge (original to original), while the native output equals both because the reconstruction is
+byte-exact.
+
+## 6. E7: what the canonical frame still does not exercise
+
+Unchanged from §E7, with two clarifications the reconstruction now supports:
+
+- The history slots (`f308..f311`), the previous-feature slots and the motion-change scalar are
+  **provably zero** on this frame, and the native shader implements the reset path only. Its
+  fixture validator rejects `reset != 0` so the gap cannot be crossed silently.
+- `param+268` / `param+272`, the previous-motion texture and the three motion surfaces are
+  implemented by *nothing* in the native stage, and cannot affect its output on this frame (§4).
+- Still unknown and out of scope: `mvlo`, HDR, non-zero motion, frames 2+ (history), the motion
+  texture's real resolution (960x540 captured against a 1919x1079 sampling window), and the two
+  1x1 textures the kernel never loads.
+
+## 7. Files
+
+- `scripts/m_enc0_model.py` - the CPU oracle, now byte-exact
+- `src/native/enc0_cs.hlsl` - the native stage (scalar, no WMMA)
+- `scripts/m_stage_fixture.py` - `enc0` stage map, `enc0_params`, the stage's validators, and a
+  buffer-UAV export path (the field is written with `st.global`, not through a surface)
+- `src/native/CMakeLists.txt` - the shader
+- `tests/test_enc0_contract.py` - dither semantics and hand-computed cases, the slot derivation,
+  the epilogue permutation, and a shader/model table cross-check
+- `tests/test_stage_fixture.py` - the `enc0` fixture validator
+- Reproduce: `python scripts/m_stage_fixture.py export <capture> --stage enc0 --out <dir>` then
+  `run <dir>`, and `python scripts/m_enc0_model.py <capture>`.
+

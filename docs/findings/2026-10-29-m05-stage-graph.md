@@ -176,6 +176,32 @@ d4r's sources:
 [M] With that mapping the stage is reproduced natively at 99.9991% / 99.9348% / 99.9787% /
 99.9883% byte agreement on the four surfaces.
 
+## Addendum (2026-10-29, later still): `enc0`'s contract, byte-exact
+
+[S] [EXP-015](../experiments/EXP-015-m05-enc0-contract.md) now derives `enc0` from the PTX too,
+and the stage reproduces its 8 355 840-byte output byte for byte.  What the pipeline needs to
+know about it:
+
+- **Bindings it never reads.**  The two 1x1 textures (`param+112`, `param+120`), the depth
+  texture (`param+136`) and the pointer at `param+40` are not loaded by this variant.  The
+  depth texture's absence identifies the display-motion path, which takes one motion vector per
+  pixel.  The three RG16F surfaces at `param+280/288/296` *are* written (`sust.b.2d.v2.b16.zero`),
+  and the token output is `param+48` = `alloc1 + 0xFF0000`, not `param+40`.
+- **The blob** is 4 096 B of dither table, 8 192 B of blocked 128x64 E4M3 matrix (`layout_offsets`
+  is the PTX's own formula) and 128 B of f16 bias, one per output column.
+- **The feature vector** is one point-sampled texel per pixel: a reset frame makes the history,
+  previous-feature and motion-change slots exactly zero, leaving 15 nonzero slots of the 32,
+  which carry the texel's r, g, b cyclically in ascending slot order.  A token is a 2x2 pixel
+  block and its four pixels are the embedding's four k32 steps in (0,0), (0,1), (1,0), (1,1)
+  order.  The kernel's shared-memory re-store is a no-op, so `k` is the slot index.
+- **The epilogue** clamps the f16 accumulator to +-2*pi and then applies a channel permutation
+  (channel `c` is not matrix column `c`) before the E4M3 conversion.  Two of the three errors
+  that had blocked `enc0` were of this kind: orders that look like bookkeeping but change every
+  byte.
+
+[M] Consequence for B5: `enc0` is no longer an unknown in the native path.  The remaining input
+stage is `post` (B4.5), and the ten-layer net still has to run inside this graph.
+
 ## Variant handling (B2/C17)
 
 [S] `scripts/m_weights.py` parses kernel names into explicit fields -
@@ -213,6 +239,8 @@ reduced-resolution motion.
   the addendum below resolves this.
 - [U] `enc0`'s descriptor count (eight) exceeds its six samplers; the two extra
   objects are not identified.
+  *Resolved:* the two extra are the 1x1 textures at `param+112`/`+120`, which the
+  kernel never loads (see the `enc0` addendum).
 
 ## References
 
