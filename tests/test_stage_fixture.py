@@ -398,5 +398,81 @@ class Enc0Fixture(unittest.TestCase):
         self.assertTrue(any('tokens' in p for p in problems), problems)
 
 
+class PostFixture(unittest.TestCase):
+    """post_3_1's declared geometry: three outputs, two different sizes."""
+
+    def record(self, **overrides):
+        record = {
+            'params': {'visible': [960, 540], 'recon': [2880, 1620],
+                       'display': [1920, 1080], 'colour_origin': [0, 0],
+                       'scale': [0.33333334, 0.33333334, 0.0, 0.0],
+                       'gain': 2.753, 'mv_scale': [1.5, 1.5],
+                       'mv_offset': [0.0, 0.0], 'reset': 1},
+            'bindings': {
+                'colour': {'kind': 'image', 'format': 'R16G16B16A16_FLOAT',
+                           'geometry': [960, 540, 1]},
+                'gate': {'kind': 'image', 'format': 'R8G8B8A8_UNORM',
+                         'geometry': [960, 540, 1]},
+                'mix': {'kind': 'image', 'format': 'R8G8B8A8_UNORM',
+                        'geometry': [960, 540, 1]},
+                'cov': {'kind': 'image', 'format': 'R16G16B16A16_FLOAT',
+                        'geometry': [960, 540, 1]},
+                'motion': {'kind': 'image', 'format': 'R16G16_FLOAT',
+                           'geometry': [960, 540, 1]},
+                'packed': {'kind': 'buffer', 'output': True,
+                           'bytes': 2880 * 1620 * 4},
+                'history': {'kind': 'image', 'output': True, 'format': 'R32_UINT',
+                            'geometry': [5760, 1620, 1], 'bytes': 2880 * 1620 * 8},
+                'half': {'kind': 'image', 'output': True,
+                         'format': 'R32G32B32A32_FLOAT',
+                         'geometry': [1440, 810, 1], 'bytes': 1440 * 810 * 16},
+            },
+            'groups': [180, 51, 1], 'threads': [16, 16, 1],
+        }
+        for key, value in overrides.items():
+            if key in record['params']:
+                record['params'][key] = value
+            elif key in record['bindings']:
+                record['bindings'][key].update(value)
+            else:
+                record[key] = value
+        return record
+
+    def test_a_consistent_record_has_no_problems(self):
+        self.assertEqual(fx.validate_stage('post_3_1', self.record()), [])
+
+    def test_the_packed_buffer_is_the_reconstruction_grid(self):
+        record = self.record()
+        record['bindings']['packed']['bytes'] = 960 * 540 * 4
+        problems = fx.validate_stage('post_3_1', record)
+        self.assertTrue(any('packed' in p for p in problems), problems)
+
+    def test_the_reconstruction_surface_is_rgba16f(self):
+        record = self.record()
+        record['bindings']['history']['bytes'] = 2880 * 1620 * 4
+        problems = fx.validate_stage('post_3_1', record)
+        self.assertTrue(any('reconstruction' in p for p in problems), problems)
+
+    def test_the_half_surface_is_a_quarter_of_the_pixels(self):
+        record = self.record()
+        record['bindings']['half']['bytes'] = 1440 * 810 * 8
+        problems = fx.validate_stage('post_3_1', record)
+        self.assertTrue(any('half' in p for p in problems), problems)
+
+    def test_the_render_textures_are_the_render_size(self):
+        record = self.record()
+        record['bindings']['cov']['geometry'] = [2880, 1620, 1]
+        problems = fx.validate_stage('post_3_1', record)
+        self.assertTrue(any('cov' in p for p in problems), problems)
+
+    def test_the_reset_frame_is_the_only_one_implemented(self):
+        problems = fx.validate_stage('post_3_1', self.record(reset=0))
+        self.assertTrue(any('reset' in p for p in problems), problems)
+
+    def test_the_dispatch_must_cover_both_rows_of_a_thread(self):
+        problems = fx.validate_stage('post_3_1', self.record(groups=[180, 1, 1]))
+        self.assertTrue(any('grid' in p for p in problems), problems)
+
+
 if __name__ == '__main__':
     sys.exit(unittest.main())
