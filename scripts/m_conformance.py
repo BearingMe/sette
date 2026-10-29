@@ -303,6 +303,54 @@ def audit_frame(fixtures):
     return result, problems
 
 
+def audit_network(report, layers_dir, suite_dir, probe, shaders):
+    """Run the ten-layer suite and the native chain, and record the B5 verdict.
+
+    The layer fixtures are capture-derived and stay in the local workspace; a
+    missing directory is reported rather than silently skipped when the caller
+    asked for the network.
+    """
+    if not os.path.isdir(layers_dir):
+        report['problems'].append(f'network: no layer fixtures at {layers_dir}')
+        return
+    suite = os.path.join(suite_dir, 'm_layer_suite.py')
+    python = sys.executable
+    for command, key in (('check', 'layers'), ('chain', 'chain')):
+        out = os.path.join(layers_dir, f'{key}-gate.json')
+        done = subprocess.run([python, suite, command, layers_dir, '--probe', probe,
+                               '--shaders', shaders, '--json', out],
+                              capture_output=True, text=True)
+        record = {}
+        if os.path.exists(out) and os.path.getsize(out):
+            try:
+                with open(out) as handle:
+                    record = json.load(handle)
+            except json.JSONDecodeError:
+                record = {}
+        if not record:
+            report['problems'].append(f'network: {command} produced no report '
+                                      f'({done.stderr.strip()[-300:]})')
+            continue
+        report['b5'] = report.get('b5', {})
+        report['b5'][key] = record
+        if command == 'check':
+            for row in record.get('layers', []):
+                for role, value in row['outputs'].items():
+                    report['surfaces'][f'{row["layer"]}.{role}'] = value
+                    print(f'  {row["layer"] + "." + role:22s} identical '
+                          f'{100 * value["identical"]:8.4f}%  {value["differing"]:>7d} differ')
+            if not record.get('pass'):
+                report['problems'].append('network: the layer suite did not pass')
+        else:
+            if record:
+                print(f'  {"chain.dec1":22s} identical '
+                      f'{100 * record.get("identical", 0):8.4f}%  '
+                      f'{record.get("differing", 0):>7d} differ  '
+                      f'deterministic={record.get("deterministic")}')
+            if done.returncode:
+                report['problems'].append('network: the native chain did not meet its floor')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -312,6 +360,13 @@ def main():
     ap.add_argument('--shaders', default=os.path.join(REPO, 'build', 'native'))
     ap.add_argument('--no-run', action='store_true',
                     help='gate the existing results instead of running the stages')
+    ap.add_argument('--network', action='store_true',
+                    help='also run the ten-layer suite and the native chain (B5)')
+    ap.add_argument('--network-probe',
+                    default=os.path.join(REPO, 'build', 'native', 'Release',
+                                         'm_network_stage.exe'))
+    ap.add_argument('--layers', default=os.environ.get(
+        'SETTE_LAYERS', os.path.join(os.path.dirname(FIXTURES), 'layers')))
     ap.add_argument('--json', type=argparse.FileType('w'), default=None)
     a = ap.parse_args()
 
@@ -350,6 +405,10 @@ def main():
             print(f'  {scope:22s} identical {100 * result["identical"]:8.4f}%  '
                   f'{shown:14s} {result["differing"]:>6d} differ  '
                   f'{"ok" if not any(scope in p for p in problems) else "FAIL"}')
+
+    if a.network:
+        print('\n  B5 ten-layer network:')
+        audit_network(report, a.layers, HERE, a.network_probe, a.shaders)
 
     # structural invariants
     dec0 = {role: np.frombuffer(
