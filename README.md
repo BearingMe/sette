@@ -18,7 +18,7 @@ The target values below are project requirements from the initialization brief. 
 
 | Area | Project target | Current evidence |
 |---|---|---|
-| Network | DLSS 4.5 Super Resolution, Preset M | [R] The local DLL 310.9.1 contains `rrlite_*` M code; the exact model version and its weights remain [U]. d4r implements a documented M reference pipeline. |
+| Network | DLSS 4.5 Super Resolution, Preset M | [R] The local DLL 310.7.0 contains `rrlite_*` M code; the exact weight set remains [U]. d4r implements a documented M reference pipeline and pins the same DLL build. |
 | Original weights | FP8 is the stated candidate representation | [S] d4r documents FP8 (e4m3) M weights and activations; [U] no weight set was extracted or verified from the local DLL. |
 | GPU | AMD Radeon RX 7700 XT, target architecture gfx1101 | [M] Enumerated and exercised in EXP-001; native INT8 and FP16 WMMA confirmed on the device. The complete ISA/feature inventory remains partial. |
 | Platform/API | Windows x64, D3D12 | [M] D3D12 compute and native WMMA executed in EXP-001; a full feature-level inventory has not been recorded separately. |

@@ -7,14 +7,14 @@ This directory holds a local-only binary reference. `nvngx_dlss.dll` is excluded
 | Field | Observation |
 |---|---|
 | Filename | `nvngx_dlss.dll` |
-| Size | 58,956,912 bytes |
-| SHA-256 | `3975567b8943c53acce397f2b72380092f84f162d00b0d2c7d08a1025c563983` |
+| Size | 58,977,904 bytes |
+| SHA-256 | `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e` |
 | Format / architecture | PE32+ / x86-64, machine `0x8664` |
 | File description | `NVIDIA DLSS - DVS PRODUCTION` |
 | Product | `NVIDIA Deep Learning SuperSampling` |
-| File version (raw version-resource value) | `310,9,1,0` |
-| Product version (raw version-resource value) | `310,9,1,0` |
-| Original filename (version resource) | `CL 38868064` |
+| File version (raw version-resource value) | `310,7,0,0` |
+| Product version (raw version-resource value) | `310,7,0,0` |
+| Original filename (version resource) | `CL 37997616` |
 | Internal name | `DLSS` |
 | Company / copyright | `NVIDIA` / `Copyright 2018 - 2024 NVIDIA CORP` |
 | Authenticode | PowerShell reported `Valid` on 2026-10-28; signer `NVIDIA Corporation`, thumbprint `7B7B0B6697AFB438CF6F65A155F00E86676FB186` |
@@ -33,8 +33,8 @@ This directory holds a local-only binary reference. `nvngx_dlss.dll` is excluded
   Get-AuthenticodeSignature references/binaries/nvngx_dlss.dll
   ```
 
-- `[R]` Extracting embedded CUDA fatbins with d4r's `kernels/tools/extract_dlss_ptx.py` produced 169 PTX modules on 2026-10-28. Three modules contain 35 unique Preset M (`rrlite_*`) entry points, covering the folded/unfolded input, expansion, network, reconstruction, and downsample stages. This establishes that the DLL contains Preset M code, not that this checkout has compatible weights or that the code executes here.
-- `[S]` d4r's pinned release tooling targets a different Super Resolution DLL: 310.7.0, SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e`. Compatibility of this 310.9.1 DLL with d4r's extractor and model package format is unknown.
+- `[R]` Extracting embedded CUDA fatbins with d4r's `kernels/tools/extract_dlss_ptx.py` produced 169 PTX modules on 2026-10-28. Thirty-five modules each contain one Preset M/L (`rrlite_*`) entry point, covering the folded/unfolded input, expansion, network, reconstruction, and downsample stages. This establishes that the DLL contains Preset M code, not that this checkout has extracted weights or that the code executes here.
+- `[S]` The SHA-256 and version match d4r's pinned Super Resolution artifact: 310.7.0, SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e` (`install.sh`). d4r's extractor and model-package compatibility were not executed in this investigation.
 - Reproduce the PTX inventory; the extracted proprietary files stay in the temporary directory and are not tracked:
 
   ```powershell

@@ -2,7 +2,7 @@
 
 ## Summary
 
-M02 acquired and inspected the four requested source references and the local NVIDIA DLL. d4r is the closest implementation oracle for Preset M, quattro supplies validated gfx1101 D3D12 INT8/FP16 WMMA mechanisms, the NVIDIA DLSS SDK supplies only API headers, and TransformerEngine supplies NVIDIA FP8 recipe context but no DLSS material. The local DLL contains Preset M PTX entry points, but d4r's extraction tooling is pinned to a different DLL version, and no redistributable model or weights were found in any acquired source.
+M02 acquired and inspected the four requested source references and the local NVIDIA DLL. d4r is the closest implementation oracle for Preset M, quattro supplies validated gfx1101 D3D12 INT8/FP16 WMMA mechanisms, the NVIDIA DLSS SDK supplies only API headers, and TransformerEngine supplies NVIDIA FP8 recipe context but no DLSS material. The local DLL contains Preset M PTX entry points and matches d4r's pinned 310.7.0 build, but no weights were extracted, and no redistributable model or weights were found in any acquired source.
 
 ## Findings
 
@@ -14,7 +14,7 @@ M02 acquired and inspected the four requested source references and the local NV
 | quattro | `ad0482a952b1af80b8be2dcaa6a49e098aa57fc1` (2026-10-28) | Full submodule; nested `.references/sources/*` submodules uninitialized | Validated gfx1101 D3D12 INT8 and FP16 WMMA probes, ISA inspection, quantization and fixed-network experiments |
 | NVIDIA DLSS | `9981c6350dc58c0ce21f024fd65e31e851c31689` (`v310.9.16`) | Shallow, sparse `include/` only | NGX API headers and license; no model, weights, or inference runner |
 | NVIDIA TransformerEngine | `dfc4158d1597f72972fe2863adac436fa3fe1d4d` (2026-10-28) | Shallow, sparse `transformer_engine/common/{recipe,cast,include}` | CUDA FP8 scaling recipes only; no DLSS or AMD relevance established |
-| Local `nvngx_dlss.dll` | SHA-256 `3975567b...563983`, file version `310,9,1,0` | Local, gitignored | Contains Preset M (`rrlite_*`) PTX; weights not extracted or verified |
+| Local `nvngx_dlss.dll` | SHA-256 `be6e434a...b6ee6e`, file version `310,7,0,0` | Local, gitignored | Matches d4r's pinned 310.7.0 build; contains Preset M (`rrlite_*`) PTX; weights not extracted or verified |
 
 ### d4r
 
@@ -23,7 +23,7 @@ M02 acquired and inspected the four requested source references and the local NV
 - `[S]` On gfx11, d4r's preset M kernels use wave32 WMMA with binary16 operands/accumulation; `kernels/m/swin_common.h` states that no native FP8 instruction is used and quantized intermediates remain binary16. Native FP8 WMMA is gated to gfx12 (`D4R_FP8_WMMA`).
 - `[S]` The standalone path is the native Vulkan engine: `MModel`/`MEngine` in `engine/runtime.h` and `engine/runtime_m.inc`, the `d4r-m` runner (`engine/replay_m.cpp`), and the D3D12 game shim in `engine/game_m.cpp`. Build requirements are Linux, Vulkan, ROCm 7.2/HIP for the native network, and the d4r toolchain listed in `README.md`.
 - `[S]` M model directories are built from a captured frame's `rrlite_enc0`, `rrlite_dec0`, and ten layer launches. `engine/compile_m.py` writes `weights8.bin` (FP8), `weights16.bin` (f16 vectors/dither), `offsets.bin`, and compiled shaders. Its docstring and `engine/README.md` state that the weights are read from NVIDIA's DLL and are not redistributable with d4r.
-- `[S]` d4r's release install pins Super Resolution `nvngx_dlss.dll` 310.7.0 with SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e` (`install.sh`). The local DLL is version 310.9.1 with a different hash.
+- `[S]` d4r's release install pins Super Resolution `nvngx_dlss.dll` 310.7.0 with SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e` (`install.sh`). The local DLL now matches that version and hash; extraction and runtime compatibility were not executed.
 
 ### quattro
 
@@ -46,14 +46,14 @@ M02 acquired and inspected the four requested source references and the local NV
 
 ### Local DLL
 
-- `[R]` Extracting the DLL's embedded fatbins with d4r's `kernels/tools/extract_dlss_ptx.py` produced 169 PTX modules. Three modules contain Preset M entries; 35 unique `rrlite_*` entry points were found, including `rrlite_enc0_4x4_{mvlo,mvhi}_{hdr,ldr}[_folded]`, `rrlite_enc1_4x4`, `rrlite_enc2_4x4`, `rrlite_enc3_tube_4x4`, `rrlite_dec0_4x4[_folded]`, `rrlite_dec1_4x4`, `rrlite_dec2_4x4`, `rrlite_post_3_{1,2}_*`, and the static/dynamic downsample kernels.
+- `[R]` Extracting the DLL's embedded fatbins with d4r's `kernels/tools/extract_dlss_ptx.py` produced 169 PTX modules. Thirty-five modules each contain one Preset M/L entry; 35 unique `rrlite_*` entry points were found, including `rrlite_enc0_4x4_{mvlo,mvhi}_{hdr,ldr}[_folded]`, `rrlite_enc1_4x4`, `rrlite_enc2_4x4`, `rrlite_enc3_tube_4x4`, `rrlite_dec0_4x4[_folded]`, `rrlite_dec1_4x4`, `rrlite_dec2_4x4`, `rrlite_post_3_{1,2}_*`, and the static/dynamic downsample kernels.
 - `[R]` The presence of `_folded` and unfolded entry points is consistent with d4r's statement that preset M uses the folded input/expansion kernels while preset L uses the unfolded ones. The local DLL therefore appears to carry both M and L code paths, but this inference was not validated at runtime.
-- `[U]` Weight location, layout compatibility with d4r's extractor, and numerical behavior of this 310.9.1 DLL are unknown. d4r's tools were built and validated against 310.7.0; the local hash differs.
+- `[U]` Weight location, layout, and numerical behavior of this DLL are unknown. It matches d4r's pinned 310.7.0 build, but d4r's extractor and model-package format were not executed against it here.
 
 ## Limitations and Unknowns
 
 - `[U]` No model or weight file exists in any acquired source repository. d4r's weights are generated locally from a user-supplied DLL and are explicitly non-redistributable.
-- `[U]` The exact Preset M model/version intended by this project is not established. The local DLL contains M code, but d4r's pinned tooling targets 310.7.0, not 310.9.1.
+- `[U]` The exact Preset M model variant and weight set within 310.7.0 are not established. Code presence and the d4r version match do not prove extractability or numerical behavior.
 - `[U]` d4r's standalone engine is a Linux/Vulkan path with an optional HIP network. It was not built or executed here, and its compatibility with this Windows/D3D12 host is unverified. WSL2 Ubuntu is installed, but no ROCm/HIP environment was validated.
 - `[M]` quattro's INT8 and FP16 WMMA experiments were rebuilt and rerun here in EXP-001 and both passed. Their recorded driver version matches this workstation; the measured single-tile minima differ slightly, consistent with run-to-run clock state.
 - `[U]` quattro's nested upstream references are uninitialized; no claim here depends on their contents.

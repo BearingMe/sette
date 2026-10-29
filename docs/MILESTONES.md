@@ -60,7 +60,7 @@ Establish the exact research target, environment, scope, and references.
 
 - [x] C01: Define project goals and exclusions in `README.md`.
 - [x] C02: Identify the target GPU, OS, API, and shader toolchain; distinguish target requirements from locally observed availability.
-- [x] C03: Identify candidate Preset M model versions and artifacts: local `nvngx_dlss.dll` 310.9.1 contains `rrlite_*` M code; no model or weights are present in acquired sources.
+- [x] C03: Identify candidate Preset M model versions and artifacts: local `nvngx_dlss.dll` 310.7.0 contains `rrlite_*` M code and matches d4r's pinned artifact; no extracted weights are present in acquired sources.
 - [x] C04: Establish the repository organization using Trace without changing generic `AGENTS.md` rules.
 - [x] C05: Document initial setup requirements and current tool inventory, including DXC 1.8.2502.11 and the pinned reference build.
 - [x] C06: Record 1920×1080 output and Quality as provisional test assumptions, not yet fixed settings.
@@ -97,7 +97,7 @@ Acquire and pin the primary sources required for reconstruction.
 - [x] C01: Inspect d4r and identify relevant code paths: `engine/` (M notes, runtime, model compiler), `kernels/m/` (WMMA network), `kernels/common/wmma_layout.h`, and `kernels/tools/extract_dlss_ptx.py`.
 - [x] C02: Inspect quattro's validated RDNA 3 experiments (EXP-004 INT8 WMMA, EXP-005 FP16 WMMA) and reproduce its build/run path in [EXP-001](experiments/EXP-001-reference-toolchain.md).
 - [x] C03: Record commit IDs and origin URLs for all four acquired submodules: d4r, quattro, NVIDIA DLSS, and NVIDIA TransformerEngine.
-- [x] C04: Identify model and weight artifacts: no model or weights are present in any acquired source; d4r extracts FP8/f16 matrices locally from a user-supplied DLL; the local DLL contains M PTX but its weights and d4r compatibility are unverified.
+- [x] C04: Identify model and weight artifacts: no model or weights are present in any acquired source; d4r extracts FP8/f16 matrices locally from a user-supplied DLL; the local DLL contains M PTX and matches d4r's pinned DLL build, but its weights were not extracted and d4r's extraction path was not run.
 - [x] C05: Locate conservative FP16 WMMA kernels: d4r `engine/cnn_sr/mma_f16.glsl` and `kernels/common/wmma_layout.h`; quattro `src/gpu/shaders/fp16_wmma.hlsl`.
 - [x] C06: Identify standalone inference entry points: d4r `engine/replay_m.cpp`, `MModel`/`MEngine` in `engine/runtime_m.inc`, and `d4r-m`; quattro `src/main.cpp` and its experiment CLI.
 - [x] C07: Record local DLL metadata, hash, signature observation, PTX inventory, and provenance/access limitations.
