@@ -1,0 +1,4 @@
+# Patches are applied with `git apply`, which requires LF line endings. Without
+# this rule a Windows checkout (core.autocrlf=true) writes CRLF and the patch
+# fails with "No valid patches in input".
+*.patch text eol=lf
