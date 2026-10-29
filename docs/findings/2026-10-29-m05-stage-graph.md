@@ -89,6 +89,10 @@ disambiguates them.
 
 ## What the capture does not contain
 
+**Superseded by the addendum below (2026-10-29, EXP-011).** The text in this section
+describes the buffer-only capture that produced this graph. Texture and surface storage is
+now captured; see the addendum for the measured inventory.
+
 [M] `enc0` binds eight descriptor objects and `post_3_1` eleven; `dec0` and
 `downsample` bind two or three.  Those objects are 96 or 272 bytes and contain
 host addresses (`0x2f14...`, `0x7ff9...`), so they are ZLUDA's texture/surface
@@ -116,6 +120,32 @@ final frame can be.  Closing that gap needs a capture extension (dump the image
 memory behind `cuArrayCreate`/`cuMemAllocPitch`, or the surface's backing
 buffer), which is a ZLUDA-side change and is recorded as an open task rather
 than approximated.
+
+## Addendum (2026-10-29): the image gap is closed
+
+[M] The replay hook now dumps the array or pitched storage behind every texture and surface
+object a launch binds (`patches/zluda/0018-m05-image-capture.patch`,
+[EXP-011](../experiments/EXP-011-m05-image-capture.md)). For the same frame:
+
+| Stage | Images | Written by the dispatch |
+|---|---:|---|
+| `enc0` | 11 (8 textures, 3 surfaces) | none - only its token buffer changes |
+| `dec0` | 6 (2 textures, 4 surfaces) | 4 surfaces |
+| `post_3_1` | 13 (11 textures, 2 surfaces) | history and half-resolution surfaces |
+| `downsample` | 3 (2 textures, 1 surface) | the final 1920x1080 image |
+
+[M] Two claims in the body of this note are corrected:
+
+1. `enc0`'s three 960x540 RG16F surfaces are **zero before and after** the dispatch, so in
+   the `mvhi` (display-motion) variant they do not receive motion candidates, or they are
+   rewritten with identical zeros. They were not merely "uncaptured".
+2. Stage-level validation of `enc0`, `dec0`, `post` and `downsample` no longer depends only
+   on the final frame: their operands and results are captured, and `downsample`'s output
+   array is byte-identical to the probe's independent `output-0.rgba16f` readback.
+
+[M] New edges confirmed by array identity and content: `dec0` gates/mix/covariance to
+`post` (3/3 identical), plus four temporal chains (`dec0` feature, `post` history, `post`
+half-resolution, `enc0` motion A) over 24 frame pairs.
 
 ## Variant handling (B2/C17)
 

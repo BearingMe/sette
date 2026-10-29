@@ -18,8 +18,8 @@ The target values below are project requirements from the initialization brief. 
 
 | Area | Project target | Current evidence |
 |---|---|---|
-| Network | DLSS 4.5 Super Resolution, Preset M | [R] The local DLL 310.7.0 contains `rrlite_*` M code; the exact weight set remains [U]. d4r implements a documented M reference pipeline and pins the same DLL build. |
-| Original weights | FP8 is the stated candidate representation | [S] d4r documents FP8 (e4m3) M weights and activations; [U] no weight set was extracted or verified from the local DLL. |
+| Network | DLSS 4.5 Super Resolution, Preset M | [R] The local DLL 310.7.0 contains `rrlite_*` M code; [M] all 360 of its matrices (1 553 408 e4m3 values) are extracted and decoded from a captured frame ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)), while the `mvlo` variant the capture cannot produce remains [U]. d4r implements a documented M reference pipeline and pins the same DLL build. |
+| Original weights | FP8 is the stated candidate representation | [S] d4r documents FP8 (e4m3) M weights and activations; [M] the captured weights are e4m3 and decode losslessly to f16 ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)). They are derived from the user's DLL and are not redistributable. |
 | GPU | AMD Radeon RX 7700 XT, target architecture gfx1101 | [M] Enumerated and exercised in EXP-001; native INT8 and FP16 WMMA confirmed on the device. The complete ISA/feature inventory remains partial. |
 | Platform/API | Windows x64, D3D12 | [M] D3D12 compute and native WMMA executed in EXP-001; a full feature-level inventory has not been recorded separately. |
 | Shader toolchain | HLSL and DXC | [M] DXC 1.8.2502.11 is installed with Windows SDK 10.0.26100.0 and compiled the EXP-001 shaders; it is not on `PATH`. |
@@ -33,7 +33,7 @@ Evidence tags follow `docs/CONVENTIONS.md`: `[D]` documentation, `[S]` source ob
 
 **Out of scope:** Other DLSS presets, Ray Reconstruction, Frame Generation, FSR, NGX/DXGI interception, game-specific integration, unrelated GPU architectures, and a generalized ML framework.
 
-The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) and the Phase II probes M06–M08 are complete. M05's capture is complete at 1920×1080 — every stage group, including the `enc0`/`dec0` weight blobs ([EXP-008](docs/experiments/EXP-008-m05-full-capture.md)) — and its layer-scope oracle replays bit-exactly ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)); the full-network oracle is now a Windows-native reconstruction task rather than a capture gap. M07 has closed the weight side: all 360 matrices (1 553 408 e4m3 values) are extracted and quantized at five scopes ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)). M09 has not started.
+The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) and the Phase II probes M06–M08 are complete. M05's capture is complete at 1920×1080 for both resource kinds: every stage group including the `enc0`/`dec0` weight blobs ([EXP-008](docs/experiments/EXP-008-m05-full-capture.md)), and every texture and surface the image-bound stages bind, 33 targets whose contents reproduce the stage edges and the final frame byte for byte ([EXP-011](docs/experiments/EXP-011-m05-image-capture.md)). The layer-scope oracle replays bit-exactly ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)), so what remains for M05 is the native reconstruction of the image-bound stages and the ten-layer chain. M07 has closed the weight side: all 360 matrices (1 553 408 e4m3 values) are extracted and quantized at five scopes ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)). M09 has not started.
 
 ## Trace research workflow
 
@@ -98,4 +98,4 @@ The Windows/D3D12 path is no longer only an inventory: EXP-001 configured and bu
 | `src/` | Reconstruction code, only when supported by evidence. |
 | `tests/` | Independent numerical and regression validation. |
 
-The [reference index](references/README.md) records four pinned source submodules and the local DLL, with inspection status and limitations. No redistributable Preset M model or weight set has been acquired. Repository state and evidence must remain sufficient to resume without AgentMemory, MemPalace, or chat history.
+The [reference index](references/README.md) records four pinned source submodules and the local DLL, with inspection status and limitations. No redistributable Preset M model has been acquired: the weights this project measures are extracted at run time from the user's own `nvngx_dlss.dll` and stay out of Git. Repository state and evidence must remain sufficient to resume without AgentMemory, MemPalace, or chat history.
