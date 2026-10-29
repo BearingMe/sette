@@ -25,8 +25,8 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 
 | ID | Milestone | Status | Validation |
 |---|---|---|---|
-| M01 | Project Initialization | IN PROGRESS | PENDING |
-| M02 | Reference Acquisition | IN PROGRESS | PENDING |
+| M01 | Project Initialization | COMPLETE | PASS |
+| M02 | Reference Acquisition | COMPLETE | PASS |
 | M03 | Preset M Architecture Reconstruction | NOT STARTED | PENDING |
 | M04 | Numerical Contract Analysis | NOT STARTED | PENDING |
 | M05 | FP16 Oracle Reproduction | NOT STARTED | PENDING |
@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-M01 remains in progress: environment requirements and current inventory are recorded, but exact compatible toolchain versions and a reproducible reference build/run path are not established. M02 is in progress after reference acquisition was authorized; d4r, quattro, and DLSS are pinned, while source inspection and remaining acquisition are pending. No milestone after M02 has started.
+Phase I reconnaissance is complete: M01 and M02 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05. No milestone after M02 has started.
 
 ---
 
@@ -50,7 +50,7 @@ M01 remains in progress: environment requirements and current inventory are reco
 
 ## M01 — Project Initialization
 
-**Status:** IN PROGRESS / PENDING
+**Status:** COMPLETE / PASS
 
 ### Objective
 
@@ -60,16 +60,16 @@ Establish the exact research target, environment, scope, and references.
 
 - [x] C01: Define project goals and exclusions in `README.md`.
 - [x] C02: Identify the target GPU, OS, API, and shader toolchain; distinguish target requirements from locally observed availability.
-- [ ] C03: Identify candidate Preset M model versions and artifacts.
+- [x] C03: Identify candidate Preset M model versions and artifacts: local `nvngx_dlss.dll` 310.9.1 contains `rrlite_*` M code; no model or weights are present in acquired sources.
 - [x] C04: Establish the repository organization using Trace without changing generic `AGENTS.md` rules.
-- [x] C05: Document initial setup requirements and current tool inventory; exact compatible versions and build instructions remain open.
+- [x] C05: Document initial setup requirements and current tool inventory, including DXC 1.8.2502.11 and the pinned reference build.
 - [x] C06: Record 1920×1080 output and Quality as provisional test assumptions, not yet fixed settings.
-- [x] C07: Record unavailable or unverified requirements: DXC is not on PATH; D3D12 feature support and reference/model access are unverified.
+- [x] C07: Record unavailable or unverified requirements: DXC is present in the SDK but not on `PATH`; d4r's Linux/HIP oracle path and Preset M weight compatibility are unverified.
 
 ### Validation Gate
 
 - [x] Project scope and exclusions are explicit.
-- [ ] Setup requirements and the reference execution path are reproducible with verified, compatible versions.
+- [x] Setup requirements and a pinned reference execution path are reproducible with verified versions (`EXP-001`: CMake/VS 2022/SDK/DXC build and both WMMA probes pass). d4r's Linux/Vulkan/HIP oracle path remains unverified and is deferred to M05.
 - [x] Important unknowns, provisional assumptions, and current environment limitations are recorded.
 
 ### Expected Deliverables
@@ -86,24 +86,26 @@ Establish the exact research target, environment, scope, and references.
 
 ## M02 — Reference Acquisition
 
+**Status:** COMPLETE / PASS
+
 ### Objective
 
 Acquire and pin the primary sources required for reconstruction.
 
 ### Checkpoints
 
-- [ ] C01: Inspect d4r and identify relevant code paths.
-- [ ] C02: Inspect quattro's validated RDNA 3 experiments.
-- [x] C03: Record commit IDs and origin URLs for acquired d4r/quattro/DLSS submodules; remaining references are explicitly pending or incomplete.
-- [ ] C04: Identify model and weight artifacts.
-- [ ] C05: Locate conservative FP16 WMMA kernels.
-- [ ] C06: Identify standalone inference entry points.
-- [x] C07: Record local DLL metadata, hash, signature observation, and provenance/access limitations.
-- [ ] C08: Identify source or model artifacts that remain unavailable.
+- [x] C01: Inspect d4r and identify relevant code paths: `engine/` (M notes, runtime, model compiler), `kernels/m/` (WMMA network), `kernels/common/wmma_layout.h`, and `kernels/tools/extract_dlss_ptx.py`.
+- [x] C02: Inspect quattro's validated RDNA 3 experiments (EXP-004 INT8 WMMA, EXP-005 FP16 WMMA) and reproduce its build/run path in [EXP-001](experiments/EXP-001-reference-toolchain.md).
+- [x] C03: Record commit IDs and origin URLs for all four acquired submodules: d4r, quattro, NVIDIA DLSS, and NVIDIA TransformerEngine.
+- [x] C04: Identify model and weight artifacts: no model or weights are present in any acquired source; d4r extracts FP8/f16 matrices locally from a user-supplied DLL; the local DLL contains M PTX but its weights and d4r compatibility are unverified.
+- [x] C05: Locate conservative FP16 WMMA kernels: d4r `engine/cnn_sr/mma_f16.glsl` and `kernels/common/wmma_layout.h`; quattro `src/gpu/shaders/fp16_wmma.hlsl`.
+- [x] C06: Identify standalone inference entry points: d4r `engine/replay_m.cpp`, `MModel`/`MEngine` in `engine/runtime_m.inc`, and `d4r-m`; quattro `src/main.cpp` and its experiment CLI.
+- [x] C07: Record local DLL metadata, hash, signature observation, PTX inventory, and provenance/access limitations.
+- [x] C08: Identify source or model artifacts that remain unavailable: NVIDIA's model definition and redistributable weights, d4r's proprietary weight packages, and quattro's uninitialized nested reference sources.
 
 ### Validation Gate
 
-All accessible references are pinned, indexed, and traceable; inaccessible or missing material is explicitly documented.
+All accessible primary references are pinned, indexed, and traceable; inaccessible or missing material is explicitly documented. Evidence: [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md), [EXP-001](experiments/EXP-001-reference-toolchain.md), and [`references/README.md`](../references/README.md).
 
 ### Expected Deliverables
 

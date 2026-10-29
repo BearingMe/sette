@@ -9,3 +9,7 @@
 	url = https://github.com/NVIDIA/DLSS.git
 	shallow = true
 	ignore = dirty
+[submodule "references/sources/transformerengine"]
+	path = references/sources/transformerengine
+	url = https://github.com/NVIDIA/TransformerEngine.git
+	shallow = true

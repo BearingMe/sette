@@ -33,4 +33,15 @@ This directory holds a local-only binary reference. `nvngx_dlss.dll` is excluded
   Get-AuthenticodeSignature references/binaries/nvngx_dlss.dll
   ```
 
-- **Unknown:** Original download/source URL, acquisition provenance, exact package/release, intended target application, and license terms. The file-version values are DLL metadata; they do not identify the DLSS 4.5 Preset M model or establish that this DLL contains its weights. No runtime behavior was tested.
+- `[R]` Extracting embedded CUDA fatbins with d4r's `kernels/tools/extract_dlss_ptx.py` produced 169 PTX modules on 2026-10-28. Three modules contain 35 unique Preset M (`rrlite_*`) entry points, covering the folded/unfolded input, expansion, network, reconstruction, and downsample stages. This establishes that the DLL contains Preset M code, not that this checkout has compatible weights or that the code executes here.
+- `[S]` d4r's pinned release tooling targets a different Super Resolution DLL: 310.7.0, SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e`. Compatibility of this 310.9.1 DLL with d4r's extractor and model package format is unknown.
+- Reproduce the PTX inventory; the extracted proprietary files stay in the temporary directory and are not tracked:
+
+  ```powershell
+  $out = Join-Path $env:TEMP 'sette-dlss-ptx'
+  python references/sources/d4r/kernels/tools/extract_dlss_ptx.py references/binaries/nvngx_dlss.dll $out
+  Select-String -Path (Join-Path $out '*.ptx') -Pattern '\.entry\s+(rrlite_[A-Za-z0-9_]+)' -AllMatches |
+    ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+  ```
+
+- **Unknown:** Original download/source URL, acquisition provenance, exact package/release, intended target application, and license terms. The file-version values are DLL metadata. Weight location, layout compatibility, and runtime behavior were not verified.
