@@ -28,7 +28,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M01 | Project Initialization | COMPLETE | PASS |
 | M02 | Reference Acquisition | COMPLETE | PASS |
 | M03 | Preset M Architecture Reconstruction | COMPLETE | PASS |
-| M04 | Numerical Contract Analysis | NOT STARTED | PENDING |
+| M04 | Numerical Contract Analysis | COMPLETE | PASS |
 | M05 | FP16 Oracle Reproduction | NOT STARTED | PENDING |
 | M06 | Operator-Level Reconstruction Probes | NOT STARTED | PENDING |
 | M07 | INT8 Quantization Feasibility | NOT STARTED | PENDING |
@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I is at M03: the M01-M03 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). The Preset M graph, stage contracts, and buffer/temporal dependencies are recorded in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md), based on d4r source inspection. M04 (numerical contract analysis) is next. d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05.
+Phase I reconnaissance is complete: M01-M04 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). The Preset M graph, tensor contracts, and numerical contract are recorded in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md), based on d4r source inspection. d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05. M05 has not started.
 
 ---
 
@@ -156,28 +156,32 @@ Understand the complete neural execution graph.
 
 ## M04 — Numerical Contract Analysis
 
+**Status:** COMPLETE / PASS
+
 ### Objective
 
 Understand the numerical behavior of the reference implementation.
 
 ### Checkpoints
 
-- [ ] C01: Trace FP8 weight decoding.
-- [ ] C02: Identify FP16 conversion behavior.
-- [ ] C03: Identify accumulator types and rounding behavior.
-- [ ] C04: Locate intermediate requantization boundaries.
-- [ ] C05: Analyze normalization and softmax precision.
-- [ ] C06: Determine output conversion and clipping behavior.
-- [ ] C07: Identify potentially sensitive residual paths.
-- [ ] C08: Compare conservative and optimized execution modes.
+- [x] C01: Trace FP8 weight decoding: e4m3 (OCP satfinite RNE), exactly representable in f16, blocked 16x16 tiles, no activation scales.
+- [x] C02: Identify FP16 conversion behavior: lossless e4m3-to-f16 widening; activations re-encoded to e4m3 at every matrix-operand boundary; f16 vectors and biases.
+- [x] C03: Identify accumulator types and rounding behavior: exact product sums within each 32-element step, one f16 rounding per step; f32 only in reconstruction weight sum/blend and in the relaxed build.
+- [x] C04: Locate intermediate requantization boundaries: block inputs, norm outputs, Q, attention output, GELU output, block/merge outputs, expanded decoder inputs, and enc0 pixel features.
+- [x] C05: Analyze normalization and softmax precision: f16 RMS sums with `2^-13`, f16 rsqrt, f16 attention scores, clamped cubic, exponent bit trick, f16 butterfly sum and reciprocal.
+- [x] C06: Determine output conversion and clipping behavior: `+-2*pi` encoder clamps, e4m3 `+-448` saturation, post range compression/clamp, 11-11-10 quantization, non-finite fallback, LDR shader variant.
+- [x] C07: Identify potentially sensitive residual paths: the two f16 residual streams, recurrent SNORM8 feature, reconstruction history feedback, and temporal accumulation.
+- [x] C08: Compare conservative and optimized execution modes: d4r's exact, relaxed (`M_RELAXED`/`M_RESIDUAL_F32`), TEXL, and int8 `dot2` modes are recorded with their deviations and d4r's reported effects.
 
 ### Validation Gate
 
-Important numerical operations have documented contracts supported by source observations or reproducible experiments; uncertainties are retained.
+- [x] Numerical contracts are documented with source references and separated from inference: [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+- [x] Each contract names its rounding order, dtype, constants, and the d4r file that establishes it.
+- [x] Uncertainties are retained: original weight container, dither index, per-architecture NVIDIA rounding, HDR/LDR differences, and the absence of any local numerical probe.
 
 ### Expected Deliverables
 
-- Numerical-fidelity findings and reproducible probes in `docs/findings/` and `docs/experiments/`.
+- Numerical-fidelity findings in `docs/findings/`; executable probes are deferred to M06, where operator-level execution is required.
 
 ### Dependencies
 

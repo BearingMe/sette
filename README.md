@@ -33,7 +33,7 @@ Evidence tags follow `docs/CONVENTIONS.md`: `[D]` documentation, `[S]` source ob
 
 **Out of scope:** Other DLSS presets, Ray Reconstruction, Frame Generation, FSR, NGX/DXGI interception, game-specific integration, unrelated GPU architectures, and a generalized ML framework.
 
-The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M02) is complete. This work does **not** implement neural kernels, quantization, or inference scaffolding; M03 has not started and requires explicit authorization.
+The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) is complete. This work does **not** implement neural kernels, quantization, or inference scaffolding; M05 (FP16 oracle reproduction) has not started and requires explicit authorization.
 
 ## Trace research workflow
 
