@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's capture coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)): the Windows hook captures the ten layers, while `enc0`/`dec0` weights and post/downsample tensors remain; C10/C11 are open. A real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the full-network gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started. M05's capture coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)): the Windows hook captures the ten layers, while `enc0`/`dec0` weights and post/downsample tensors remain. A probe-side hook could not extend coverage because NGX uses ZLUDA's internal graph path ([EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md)), so C10 requires a ZLUDA rebuild; C11 is open. A real-weight layer oracle exists — ten Preset M layers replay bit-exactly against captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M05 remains BLOCKED at the full-network gate; M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -212,7 +212,7 @@ Establish a deterministic reference execution path.
 - [x] C07: Establish repeatability and tolerance requirements (two native replays byte-identical; exact tolerance).
 - [x] C08: Identify nondeterministic behavior, if any (none observed at layer scope).
 - [x] C09: Capture coverage audit: map the M dispatches against the ZLUDA whitelist and classify the missing groups by weights versus tensors ([finding](../findings/2026-10-29-m05-capture-coverage.md)).
-- [ ] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors; rebuild the hook or use the documented probe-side fallback.
+- [ ] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors. A probe-side MinHook attempt was installed but observed zero NGX launches because the internal ZLUDA graph path bypasses exported CUDA entry points ([EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md)); a ZLUDA-internal rebuild is required.
 - [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression.
 
 ### Validation Gate
