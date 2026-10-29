@@ -209,8 +209,11 @@ launch from its recorded formats, geometry, pitch, parameter block and dispatch
 ([EXP-012](experiments/EXP-012-m05-native-downsample.md)), and `dec0` is reconstructed
 natively as well: its operand and weight mapping is derived from the kernel's own PTX, and all
 four surfaces are reproduced on the GPU with a measured residual
-([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)). Still open: `enc0`, `post`, the numerical
-conformance write-up, the ten-layer native chain (C20) and the full frame (C21).
+([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)). `enc0` and `post` are reconstructed and byte-exact
+([EXP-015](experiments/EXP-015-m05-enc0-contract.md),
+[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)); the ten-layer native chain
+(C20) now executes and is deterministic but is not yet byte-faithful
+([EXP-019](experiments/EXP-019-m05-native-network.md)). C21, the full frame, is the next gate.
 `downsample`'s captured output array is byte-identical to the probe's
 independent D3D12 readback of the final frame, `dec0`'s four surfaces match `dec0_m.comp`
 and feed `post` byte for byte, and four temporal chains hold across 24 frame pairs. The
@@ -282,7 +285,17 @@ Establish a deterministic reference execution path.
   first run that check found `post` was non-deterministic (one block, at pixels whose
   out-of-bounds motion fetch perturbed the dispatch), which is fixed. The history branch of
   `dec0` (frames with `reset = 0`) and of `post` is not implemented.
-- [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
+- [ ] B5 (C20): Neural network integration - **in progress**. The ten layers execute
+  natively on the GPU through one 94-dispatch D3D12 graph with GPU-resident intermediates,
+  use the captured weights and inputs, and are deterministic; each layer reproduces
+  93.6-98.7% of the captured e4m3 codes (enc1 96.924%, enc2 96.890%, tube#1..#6
+  96.376/98.586/97.899/98.745/97.221/93.584%, dec2 94.853%, dec1 95.365%), and the
+  natural-order contract is bit-identical to the kernel-order model and to the shader.
+  It is **not byte-faithful**: the residual is a real 0.2-0.4% numerical difference (not
+  accumulation-order, not q8, not the RMS root), and it compounds - the chained native
+  `dec1` matches only 21.327% of the captured field, below the 99% chain floor, so the
+  `--network` gate fails. The blocker, the negative results (k16/k8/f32 accumulation) and
+  the toolchain findings are in [EXP-019](experiments/EXP-019-m05-native-network.md).
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 
@@ -299,9 +312,10 @@ with the captured images. The Windows-native reconstruction is in progress: one 
 reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md))
 and `downsample` now reproduces its captured surface byte for byte, with the fixture path
 that executes a captured launch natively ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
-What remains is `enc0`, `post` (B4), the ten-layer native chain (B5), the
-full frame (B6) and temporal validation (B7, now possible: four temporal chains hold over 24
-frame pairs). `dec0`'s four surfaces are reproduced with a measured, attributed residual -
+What remains is a byte-faithful ten-layer chain (B5: it runs natively and
+deterministically, but the chained `dec1` field is 21.3%, not the required 99%,
+[EXP-019](experiments/EXP-019-m05-native-network.md)), the full frame (B6) and
+temporal validation (B7, now possible: four temporal chains hold over 24 frame pairs). `dec0`'s four surfaces are reproduced with a measured, attributed residual -
 gates 99.9991%, mix 99.9348%, feature 99.9787%, covariance 99.9883% of f16 values identical
 ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)) - and its operand mapping is now derived
 from the kernel's PTX. C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).

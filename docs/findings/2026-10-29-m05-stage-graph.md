@@ -226,6 +226,31 @@ pipeline needs to know:
 canonical frame, so the ten-layer net is the only part of the native path that is still an
 unknown.
 
+## Addendum (2026-10-29): the native ten-layer graph
+
+[M] [EXP-019](../experiments/EXP-019-m05-native-network.md) executes the ten layers as
+ten native graphs whose edges are the fields this finding already identified, with no
+host round trip:
+
+| producer | field | consumer |
+|---|---|---|
+| enc1 | merge (240x136x96 e4m3) | enc2 input |
+| enc2 | merge (120x68x128) | tube#1 input |
+| tube#n | out (120x68x128) | tube#(n+1) input |
+| tube#6 | out | dec2 input |
+| enc2 | out (240x136x96) | dec2 skip |
+| dec2 | out (240x136x96) | dec1 input |
+| enc1 | out (480x272x64) | dec1 skip |
+| dec1 | out (480x272x64) | dec0 input |
+
+Each layer is 9 dispatches (10 for encoders, which also merge): `expand` (decoders),
+`prepare`, `norm1`, `q`, `v`, `attention`, `wo`, `norm2`, `mlp`, `store`, and `merge`.
+The chain is 94 dispatches over 146 resources.  The physical layout is the captured one:
+a token is 32 contiguous e4m3 bytes and a field is `C/32` planes of `H x W` tokens, so
+the native `dec1` output is directly the field `dec0` reads.  The numerical state of the
+chain is recorded in EXP-019: the field is produced, deterministic, and 21.3% identical
+to the capture, so the graph is established but not yet a faithful reconstruction.
+
 ## Variant handling (B2/C17)
 
 [S] `scripts/m_weights.py` parses kernel names into explicit fields -
