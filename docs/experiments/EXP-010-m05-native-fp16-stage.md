@@ -109,6 +109,16 @@ float64 sum (`chain` and `exact` differ on 24.8% of values by construction).
 - [U] No WMMA/tensor-core path yet: this is a scalar HLSL implementation, so no
   throughput claim is made (M14).
 
+## Addendum (2026-10-29): the epilogue's reference now exists
+
+The epilogue itself is still unimplemented, so the limitation above stands. The *reason*
+given in the original references — that `dec0`'s four surfaces cannot be validated from the
+capture — no longer applies: the replay hook now dumps them, `dec0` writes all four, and
+their contents reach `post` byte for byte ([EXP-011](EXP-011-m05-image-capture.md)). The
+surfaces are `SNORM8X4` (feature), `UNORM8X4` (gates), `UNORM8X4` (mix) and `RGBA16F`
+(covariance) at 960x540, so C2 has a stage-level reference for both the matrix result and
+the encoded surfaces.
+
 ## Files
 
 - `src/native/m_stage_probe.cpp`, `src/native/gemm_f16_cs.hlsl`,
@@ -121,6 +131,6 @@ float64 sum (`chain` and `exact` differ on 24.8% of values by construction).
 
 - [EXP-009](EXP-009-m07-complete-inventory.md) (the captured operands used here)
 - [EXP-006](EXP-006-m06-operator-contract.md) (the accumulator chain contract)
-- [stage graph](../findings/2026-10-29-m05-stage-graph.md) (why `dec0`'s
-  epilogue cannot be validated from this capture yet)
+- [stage graph](../findings/2026-10-29-m05-stage-graph.md) (`dec0`'s bindings;
+  the surfaces are captured as of [EXP-011](EXP-011-m05-image-capture.md))
 - [EXP-001](EXP-001-reference-toolchain.md) (D3D12/DXC toolchain)

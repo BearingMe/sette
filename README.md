@@ -93,6 +93,7 @@ The Windows/D3D12 path is no longer only an inventory: EXP-001 configured and bu
 | `docs/CONVENTIONS.md` | Evidence, experiment, finding, and validation rules. |
 | `docs/experiments/` | Reproducible probes and observations. |
 | `docs/findings/` | Consolidated technical knowledge. |
+| `patches/` | Project-owned deltas to a pinned reference, applied outside it. |
 | `references/` | Reference index, provenance, and pinned sources. |
 | `scripts/` | Reusable investigation utilities. |
 | `src/` | Reconstruction code, only when supported by evidence. |

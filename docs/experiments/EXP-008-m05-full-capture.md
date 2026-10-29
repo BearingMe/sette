@@ -107,6 +107,16 @@ resolution rather than the 512x288 convenience size.
   Nothing in this experiment depends on the answer, but the full-model oracle
   will, if it is built from a `mvlo` game capture instead.
 
+## Addendum (2026-10-29): images are captured too
+
+This experiment covers buffers and weights. The textures and surfaces that `enc0`, `dec0`,
+`post` and `downsample` bind are now dumped by the same hook as well (33 image targets per
+frame, with geometry, format, pitch and pre/post contents), and the second bullet above is
+resolved by `D4R_CUDA_REPLAY_DUMP_LIMIT` (see the addendum below and
+[EXP-011](EXP-011-m05-image-capture.md)). One consequence worth knowing: at ~0.95 GB of
+images per 1080p frame, a temporal capture must bound its frame count or it fills the
+volume.
+
 ## Files
 
 - Capture workspaces stay under the temp directory; no capture data is

@@ -2,6 +2,12 @@
 
 ## Summary
 
+**Status note (2026-10-29):** this audit describes the state *before* C10 and is kept as
+written. The whitelist gap it identifies is closed ([EXP-008](../experiments/EXP-008-m05-full-capture.md)),
+and the image-backed operands and results those stages use are captured too
+([EXP-011](../experiments/EXP-011-m05-image-capture.md)). The weight/tensor analysis below
+still holds; "Captured? = no" is historical.
+
 The Windows capture path is complete for the ten `rrlite_*_4x4` Swin layers and
 incomplete for the remaining Preset M stages. This audit maps the 35 `rrlite_*`
 entry points in the local 310.7.0 DLL against the ZLUDA replay whitelist and
