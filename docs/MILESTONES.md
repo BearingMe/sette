@@ -29,7 +29,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M02 | Reference Acquisition | COMPLETE | PASS |
 | M03 | Preset M Architecture Reconstruction | COMPLETE | PASS |
 | M04 | Numerical Contract Analysis | COMPLETE | PASS |
-| M05 | FP16 Oracle Reproduction | NOT STARTED | PENDING |
+| M05 | FP16 Oracle Reproduction | BLOCKED | BLOCKED |
 | M06 | Operator-Level Reconstruction Probes | NOT STARTED | PENDING |
 | M07 | INT8 Quantization Feasibility | NOT STARTED | PENDING |
 | M08 | RDNA 3 Native INT8 Probes | NOT STARTED | PENDING |
@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01-M04 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). The Preset M graph, tensor contracts, and numerical contract are recorded in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md), based on d4r source inspection. d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05. M05 has not started.
+Phase I reconnaissance is complete: M01-M04 gates pass. Phase II has started: M05 (FP16 oracle reproduction) is blocked because no Preset M weight upload has been captured, and neither d4r's Linux path nor its Windows branch nor the public Windows release supplies one; the Windows branch build/capture route and its open risks are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md). M06-M08 have not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -193,6 +193,10 @@ Understand the numerical behavior of the reference implementation.
 
 ## M05 — FP16 Oracle Reproduction
 
+**Status:** BLOCKED / BLOCKED
+
+**Blocker:** No Preset M weight upload has been captured. d4r's Windows branch provides a native engine, a D3D12 DLSS probe, and M capture-validation scripts, but it explicitly requires a real captured NGX upload, and the public Windows release contains no weights or capture. The build/capture route and its risks are recorded in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md). No substitute oracle was derived from the reconstruction under test.
+
 ### Objective
 
 Establish a deterministic reference execution path.
@@ -211,6 +215,8 @@ Establish a deterministic reference execution path.
 ### Validation Gate
 
 Reference execution is reproducible, and captured outputs are suitable for differential testing with repeatability/tolerance criteria recorded.
+
+**Validation is BLOCKED:** no reference execution or captured output exists. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
