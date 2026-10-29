@@ -147,6 +147,17 @@ object a launch binds (`patches/zluda/0018-m05-image-capture.patch`,
 `post` (3/3 identical), plus four temporal chains (`dec0` feature, `post` history, `post`
 half-resolution, `enc0` motion A) over 24 frame pairs.
 
+## Addendum (2026-10-29): the reconstruction buffer's layout
+
+[M] The 18 662 400-byte buffer `post_3_1` writes and `downsample` reads is 2880x1620
+32-bit words - 4 bytes per *source* pixel, i.e. 9 bytes per output pixel at 1.5 x 1.5
+source pixels per output pixel. Each word is the LDR-packed display colour in 11-11-10 bits
+using all 32: r = bits 0..10 over 2047, g = bits 11..21 over 2047, b = bits 22..31 over
+1023. The stage that consumes it, `downsample`, is reconstructed natively and reproduces its
+captured surface byte for byte
+([EXP-012](../experiments/EXP-012-m05-native-downsample.md)), so this is a measured layout
+rather than a reading of `down_m.comp`.
+
 ## Variant handling (B2/C17)
 
 [S] `scripts/m_weights.py` parses kernel names into explicit fields -
@@ -181,7 +192,7 @@ reduced-resolution motion.
   (which pointers resolve, which bytes change) plus the stage sources.  It is
   consistent for every stage but was not derived from a debug symbol.
 - [U] `post_3_1`'s 18 662 400-byte output buffer is 9 bytes per output pixel;
-  its internal layout is not established here.
+  the addendum below resolves this.
 - [U] `enc0`'s descriptor count (eight) exceeds its six samplers; the two extra
   objects are not identified.
 

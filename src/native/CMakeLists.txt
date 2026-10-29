@@ -1,10 +1,14 @@
-# C18 native execution path: one compute dispatch, no framework.
+# C18/B4 native execution paths: one compute dispatch each, no framework.
 #
 #   cmake -S src/native -B build/native -G "Visual Studio 17 2022" -A x64
 #   cmake --build build/native --config Release
 #
-# The shader is compiled by DXC (not FXC): the project targets HLSL and DXC per
-# M01, and the probe must be able to grow into the 16-bit paths later.
+# `m_stage_probe` runs one matrix stage from a `MSTAGE01` case (EXP-010).
+# `m_image_stage` runs one image stage from a text fixture (EXP-012): the
+# bindings, formats, geometry and dispatch come from a captured launch.
+#
+# The shaders are compiled by DXC (not FXC): the project targets HLSL and DXC per
+# M01, and both the f16 and the f64 paths need SM 6.x code generation.
 cmake_minimum_required(VERSION 3.20)
 project(m_stage_probe LANGUAGES CXX)
 
@@ -13,9 +17,12 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 add_executable(m_stage_probe m_stage_probe.cpp)
-target_compile_features(m_stage_probe PRIVATE cxx_std_17)
-target_compile_definitions(m_stage_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(m_stage_probe PRIVATE d3d12 dxgi)
+add_executable(m_image_stage m_image_stage.cpp)
+foreach(target m_stage_probe m_image_stage)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+    target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(${target} PRIVATE d3d12 dxgi)
+endforeach()
 
 find_program(DXC_EXECUTABLE
     NAMES dxc
@@ -25,13 +32,30 @@ if(NOT DXC_EXECUTABLE)
     message(FATAL_ERROR "dxc.exe not found; set -DDXC_EXECUTABLE=<path>")
 endif()
 
-set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/gemm_f16_cs.hlsl")
-set(SHADER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/gemm_f16_cs.cso")
-add_custom_command(
-    OUTPUT "${SHADER_OUTPUT}"
-    COMMAND "${DXC_EXECUTABLE}" -T cs_6_2 -E main -O3
-            "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${SHADER_SOURCE}" -Fo "${SHADER_OUTPUT}"
-    DEPENDS "${SHADER_SOURCE}"
-    COMMENT "dxc gemm_f16_cs.hlsl -> gemm_f16_cs.cso")
-add_custom_target(m_stage_shaders ALL DEPENDS "${SHADER_OUTPUT}")
+# shader source|entry point|output name
+set(SHADERS
+    "gemm_f16_cs.hlsl|main|gemm_f16_cs.cso"
+    "image_copy_cs.hlsl|CopyTex|image_copy_tex.cso"
+    "image_copy_cs.hlsl|CopyBuf|image_copy_buf.cso"
+    "downsample_cs.hlsl|main|downsample_cs.cso")
+
+set(SHADER_OUTPUTS)
+foreach(entry IN LISTS SHADERS)
+    string(REPLACE "|" ";" fields "${entry}")
+    list(GET fields 0 source)
+    list(GET fields 1 entrypoint)
+    list(GET fields 2 output)
+    set(input "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
+    set(artifact "${CMAKE_CURRENT_BINARY_DIR}/${output}")
+    add_custom_command(
+        OUTPUT "${artifact}"
+        COMMAND "${DXC_EXECUTABLE}" -T cs_6_2 -E "${entrypoint}" -O3
+                "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
+        DEPENDS "${input}"
+        COMMENT "dxc ${source}:${entrypoint} -> ${output}")
+    list(APPEND SHADER_OUTPUTS "${artifact}")
+endforeach()
+
+add_custom_target(m_stage_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_dependencies(m_stage_probe m_stage_shaders)
+add_dependencies(m_image_stage m_stage_shaders)

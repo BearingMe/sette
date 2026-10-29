@@ -1,0 +1,651 @@
+// M05 B4.1: the smallest native path that can execute an *image* stage.
+//
+// `m_stage_probe` executes one buffer-to-buffer matrix stage.  This program
+// executes one compute dispatch whose operands and results are 2D images and
+// typed buffers, resolving each binding from a stage fixture instead of from
+// hard-coded roles:
+//
+//   version 2
+//   shader  <file>                  the .cso, relative to the fixture directory
+//   threads X Y Z                   the shader's [numthreads]
+//   groups  X Y Z                   the Dispatch dimensions
+//   params  <file> <bytes>          one constant buffer, b0
+//   srv buffer  <reg> <file> <bytes>
+//   srv tex2d   <reg> <FORMAT> <w> <h> <file>
+//   uav buffer  <reg> <file> <bytes>
+//   uav tex2d   <reg> <FORMAT> <w> <h> <file>
+//
+// A `uav` declares an output: its file is written after the dispatch.  A `srv`
+// declares an input and must exist.  Formats are named, never inferred, so a
+// fixture cannot silently reinterpret bytes; `buffer` means a raw 32-bit view.
+// Row pitch is D3D12's copyable footprint, computed by the runtime and printed,
+// so a padded layout is visible rather than assumed away.
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+namespace fs = std::filesystem;
+
+namespace {
+
+constexpr uint32_t kAlignment = 256;
+
+void Check(HRESULT hr, const char* what) {
+    if (FAILED(hr)) {
+        char text[256];
+        std::snprintf(text, sizeof(text), "%s failed (hr=0x%08lx)", what,
+                      static_cast<unsigned long>(hr));
+        throw std::runtime_error(text);
+    }
+}
+
+std::vector<uint8_t> ReadFile(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot open " + path.string());
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+}
+
+void WriteFile(const fs::path& path, const void* data, size_t bytes) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("cannot write " + path.string());
+    out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+}
+
+uint32_t Align(uint64_t value) {
+    return static_cast<uint32_t>((value + kAlignment - 1) & ~uint64_t(kAlignment - 1));
+}
+
+// The formats a fixture may name.  Only what the captured resources use is
+// listed: an unlisted name is an error, not a guess.
+struct FormatInfo {
+    DXGI_FORMAT format;
+    uint32_t pixelBytes;
+    bool uav;
+};
+
+const std::map<std::string, FormatInfo>& Formats() {
+    static const std::map<std::string, FormatInfo> table = {
+        {"R16_FLOAT", {DXGI_FORMAT_R16_FLOAT, 2, true}},
+        {"R16G16_FLOAT", {DXGI_FORMAT_R16G16_FLOAT, 4, true}},
+        {"R16G16B16A16_FLOAT", {DXGI_FORMAT_R16G16B16A16_FLOAT, 8, true}},
+        {"R32_FLOAT", {DXGI_FORMAT_R32_FLOAT, 4, true}},
+        {"R32G32_FLOAT", {DXGI_FORMAT_R32G32_FLOAT, 8, true}},
+        {"R32G32B32A32_FLOAT", {DXGI_FORMAT_R32G32B32A32_FLOAT, 16, true}},
+        // A SNORM surface has no UAV format; its bytes are written through the
+        // UNORM view, which stores the same byte for the same logical value.
+        {"R8G8B8A8_UNORM", {DXGI_FORMAT_R8G8B8A8_UNORM, 4, true}},
+    };
+    return table;
+}
+
+const FormatInfo& Lookup(const std::string& name) {
+    auto it = Formats().find(name);
+    if (it == Formats().end()) throw std::runtime_error("unknown format " + name);
+    return it->second;
+}
+
+enum class Kind { Buffer, Texture };
+
+struct Binding {
+    bool input = true;
+    Kind kind = Kind::Buffer;
+    uint32_t reg = 0;
+    std::string formatName;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t pixelBytes = 4;
+    uint32_t width = 0, height = 0;
+    uint64_t bytes = 0;
+    fs::path file;
+    std::vector<uint8_t> data;
+};
+
+struct Fixture {
+    fs::path directory;
+    fs::path shader;
+    uint32_t threads[3] = {1, 1, 1};
+    uint32_t groups[3] = {1, 1, 1};
+    std::vector<uint8_t> params;
+    std::vector<Binding> bindings;
+};
+
+Fixture Parse(const fs::path& manifest, const fs::path& shaderDir) {
+    Fixture f;
+    f.directory = manifest.parent_path();
+    std::ifstream in(manifest);
+    if (!in) throw std::runtime_error("cannot open " + manifest.string());
+    std::string line;
+    int version = 0;
+    while (std::getline(in, line)) {
+        std::istringstream words(line);
+        std::string key;
+        if (!(words >> key) || key.empty() || key[0] == '#') continue;
+        if (key == "version") {
+            words >> version;
+        } else if (key == "shader") {
+            std::string name;
+            words >> name;
+            fs::path relative(name);
+            f.shader = relative.is_absolute() ? relative : f.directory / relative;
+            if (!fs::exists(f.shader) && !shaderDir.empty())
+                f.shader = shaderDir / relative;
+        } else if (key == "threads") {
+            words >> f.threads[0] >> f.threads[1] >> f.threads[2];
+        } else if (key == "groups") {
+            words >> f.groups[0] >> f.groups[1] >> f.groups[2];
+        } else if (key == "params") {
+            std::string name;
+            uint64_t bytes = 0;
+            words >> name >> bytes;
+            f.params = ReadFile(f.directory / name);
+            if (f.params.size() != bytes)
+                throw std::runtime_error("params size mismatch in " + manifest.string());
+        } else if (key == "srv" || key == "uav") {
+            Binding b;
+            b.input = key == "srv";
+            std::string kind, name;
+            words >> kind >> b.reg;
+            b.kind = kind == "tex2d" ? Kind::Texture : Kind::Buffer;
+            if (kind != "tex2d" && kind != "buffer")
+                throw std::runtime_error("unknown binding kind " + kind);
+            if (b.kind == Kind::Texture) {
+                words >> b.formatName >> b.width >> b.height >> name;
+                const FormatInfo& info = Lookup(b.formatName);
+                b.format = info.format;
+                b.pixelBytes = info.pixelBytes;
+                if (!b.input && !info.uav)
+                    throw std::runtime_error(b.formatName + " cannot be a UAV");
+                b.bytes = uint64_t(b.width) * b.height * b.pixelBytes;
+            } else {
+                words >> name >> b.bytes;
+                b.format = DXGI_FORMAT_R32_UINT;
+                if (b.bytes % 4) throw std::runtime_error("buffer binding is not 32-bit aligned");
+            }
+            b.file = f.directory / name;
+            if (b.input) {
+                b.data = ReadFile(b.file);
+                if (b.data.size() != b.bytes)
+                    throw std::runtime_error("input size mismatch: " + b.file.string());
+            }
+            f.bindings.push_back(std::move(b));
+        } else {
+            throw std::runtime_error("unknown manifest key " + key);
+        }
+    }
+    if (version != 2) throw std::runtime_error("unsupported fixture version");
+    if (f.shader.empty()) throw std::runtime_error("manifest has no shader");
+    if (f.params.empty()) throw std::runtime_error("manifest has no params");
+    return f;
+}
+
+struct GpuBuffer {
+    ComPtr<ID3D12Resource> resource;
+    uint64_t size = 0;
+    void* mapped = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS address = 0;
+    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+};
+
+class Runner {
+public:
+    Runner() {
+        UINT flags = 0;
+        const bool wantDebug = GetEnvironmentVariableW(L"M_STAGE_DEBUG", nullptr, 0) > 0;
+        ComPtr<ID3D12Debug> debug;
+        if (wantDebug && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+            debug->EnableDebugLayer();
+            flags |= DXGI_CREATE_FACTORY_DEBUG;
+        }
+        ComPtr<IDXGIFactory6> factory;
+        Check(CreateDXGIFactory2(flags, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+        ComPtr<IDXGIAdapter1> adapter;
+        for (UINT i = 0;
+             factory->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                 IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
+             ++i) {
+            DXGI_ADAPTER_DESC1 desc{};
+            adapter->GetDesc1(&desc);
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
+                                            IID_PPV_ARGS(&device_)))) {
+                std::wprintf(L"device: %s (vendor 0x%04x)\n", desc.Description, desc.VendorId);
+                break;
+            }
+        }
+        if (!device_) throw std::runtime_error("no D3D12 device at feature level 12_0");
+
+        D3D12_COMMAND_QUEUE_DESC queue{};
+        queue.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        Check(device_->CreateCommandQueue(&queue, IID_PPV_ARGS(&queue_)), "CreateCommandQueue");
+        Check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                              IID_PPV_ARGS(&allocator_)),
+              "CreateCommandAllocator");
+        Check(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, allocator_.Get(),
+                                         nullptr, IID_PPV_ARGS(&list_)),
+              "CreateCommandList");
+        Check(list_->Close(), "Close");
+        Check(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "CreateFence");
+        event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!event_) throw std::runtime_error("CreateEventW failed");
+    }
+
+    ~Runner() {
+        if (event_) CloseHandle(event_);
+    }
+
+    void Run(Fixture& f, const fs::path& outputDir) {
+        const uint32_t srvCount = Count(f, true), uavCount = Count(f, false);
+        ComPtr<ID3D12RootSignature> signature = MakeRootSignature(srvCount, uavCount);
+        ComPtr<ID3D12PipelineState> pipeline = MakePipeline(signature.Get(), f.shader);
+
+        GpuBuffer params = Upload(f.params.size(), f.params.data());
+        std::vector<GpuBuffer> resources(f.bindings.size());
+        std::vector<GpuBuffer> readback(f.bindings.size());
+        for (size_t i = 0; i < f.bindings.size(); ++i) {
+            Binding& b = f.bindings[i];
+            if (!b.input) {
+                resources[i] = b.kind == Kind::Texture
+                                   ? CommittedTexture(b, D3D12_RESOURCE_STATE_COPY_DEST)
+                                   : CommittedBuffer(Align(b.bytes), D3D12_HEAP_TYPE_DEFAULT,
+                                                     D3D12_RESOURCE_STATE_COPY_DEST, true);
+                readback[i] = b.kind == Kind::Texture
+                                  ? TextureStaging(b, D3D12_HEAP_TYPE_READBACK,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST)
+                                  : CommittedBuffer(Align(b.bytes), D3D12_HEAP_TYPE_READBACK,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, false);
+            } else if (b.kind == Kind::Texture) {
+                resources[i] = UploadTexture(b);
+            } else {
+                resources[i] = Upload(b.bytes, b.data.data());
+            }
+        }
+
+        Check(allocator_->Reset(), "Reset(allocator)");
+        Check(list_->Reset(allocator_.Get(), pipeline.Get()), "Reset(list)");
+
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heapDesc.NumDescriptors = srvCount + uavCount;
+        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        ComPtr<ID3D12DescriptorHeap> heap;
+        Check(device_->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&heap)),
+              "CreateDescriptorHeap");
+        const UINT stride = device_->GetDescriptorHandleIncrementSize(
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu = heap->GetGPUDescriptorHandleForHeapStart();
+
+        uint32_t srvIndex = 0, uavIndex = 0;
+        for (size_t i = 0; i < f.bindings.size(); ++i) {
+            const Binding& b = f.bindings[i];
+            const uint32_t slot = b.input ? srvIndex++ : uavIndex++;
+            const uint32_t at = b.input ? slot : srvCount + slot;
+            D3D12_CPU_DESCRIPTOR_HANDLE handle{cpu.ptr + SIZE_T(at) * stride};
+            if (b.input) {
+                if (b.kind == Kind::Texture) {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                    srv.Format = b.format;
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srv.Texture2D.MipLevels = 1;
+                    device_->CreateShaderResourceView(resources[i].resource.Get(), &srv, handle);
+                } else {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                    srv.Format = DXGI_FORMAT_R32_UINT;
+                    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    srv.Buffer.NumElements = static_cast<UINT>(b.bytes / 4);
+                    device_->CreateShaderResourceView(resources[i].resource.Get(), &srv, handle);
+                }
+            } else {
+                if (b.kind == Kind::Texture) {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+                    uav.Format = b.format;
+                    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                    device_->CreateUnorderedAccessView(resources[i].resource.Get(), nullptr,
+                                                       &uav, handle);
+                } else {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+                    uav.Format = DXGI_FORMAT_R32_UINT;
+                    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                    uav.Buffer.NumElements = static_cast<UINT>(b.bytes / 4);
+                    device_->CreateUnorderedAccessView(resources[i].resource.Get(), nullptr,
+                                                       &uav, handle);
+                }
+            }
+        }
+
+        ID3D12DescriptorHeap* heaps[] = {heap.Get()};
+        list_->SetDescriptorHeaps(1, heaps);
+        list_->SetComputeRootSignature(signature.Get());
+        list_->SetComputeRootConstantBufferView(0, params.address);
+        list_->SetComputeRootDescriptorTable(1, gpu);
+        list_->SetComputeRootDescriptorTable(2, D3D12_GPU_DESCRIPTOR_HANDLE{
+                                                      gpu.ptr + SIZE_T(srvCount) * stride});
+        for (size_t i = 0; i < f.bindings.size(); ++i) {
+            if (f.bindings[i].input) continue;
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resources[i].resource.Get();
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            list_->ResourceBarrier(1, &barrier);
+        }
+        list_->Dispatch(f.groups[0], f.groups[1], f.groups[2]);
+
+        // ---- read back every output -------------------------------------
+        for (size_t i = 0; i < f.bindings.size(); ++i) {
+            const Binding& b = f.bindings[i];
+            if (b.input) continue;
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = resources[i].resource.Get();
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            list_->ResourceBarrier(1, &barrier);
+            CopyOut(resources[i], readback[i], b);
+        }
+        Check(list_->Close(), "Close(list)");
+
+        ID3D12CommandList* lists[] = {list_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
+        Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
+        WaitForSingleObject(event_, INFINITE);
+
+        fs::create_directories(outputDir);
+        for (size_t i = 0; i < f.bindings.size(); ++i) {
+            const Binding& b = f.bindings[i];
+            if (b.input) continue;
+            std::vector<uint8_t> bytes(b.bytes);
+            Gather(readback[i], b, bytes.data());
+            WriteFile(outputDir / b.file.filename(), bytes.data(), bytes.size());
+            std::printf("wrote %s (%llu bytes)\n", b.file.filename().string().c_str(),
+                        static_cast<unsigned long long>(bytes.size()));
+        }
+        std::printf("dispatch %ux%ux%u threads %ux%ux%u, %zu binding(s)\n", f.groups[0],
+                    f.groups[1], f.groups[2], f.threads[0], f.threads[1], f.threads[2],
+                    f.bindings.size());
+    }
+
+private:
+    static uint32_t Count(const Fixture& f, bool input) {
+        uint32_t n = 0;
+        for (const Binding& b : f.bindings)
+            if (b.input == input) ++n;
+        return n;
+    }
+
+    ComPtr<ID3D12RootSignature> MakeRootSignature(uint32_t srvCount, uint32_t uavCount) {
+        D3D12_DESCRIPTOR_RANGE ranges[2]{};
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[0].NumDescriptors = srvCount;
+        ranges[0].BaseShaderRegister = 0;
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = uavCount;
+        ranges[1].BaseShaderRegister = 0;
+
+        D3D12_ROOT_PARAMETER params[3]{};
+        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[0].Descriptor.ShaderRegister = 0;
+        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable.NumDescriptorRanges = srvCount ? 1u : 0u;
+        params[1].DescriptorTable.pDescriptorRanges = &ranges[0];
+        params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[2].DescriptorTable.NumDescriptorRanges = uavCount ? 1u : 0u;
+        params[2].DescriptorTable.pDescriptorRanges = &ranges[1];
+
+        D3D12_ROOT_SIGNATURE_DESC desc{};
+        desc.NumParameters = 3;
+        desc.pParameters = params;
+        ComPtr<ID3DBlob> signature, error;
+        HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &signature,
+                                                 &error);
+        if (FAILED(hr) && error)
+            std::fprintf(stderr, "%s\n", static_cast<const char*>(error->GetBufferPointer()));
+        Check(hr, "D3D12SerializeRootSignature");
+        ComPtr<ID3D12RootSignature> result;
+        Check(device_->CreateRootSignature(0, signature->GetBufferPointer(),
+                                           signature->GetBufferSize(), IID_PPV_ARGS(&result)),
+              "CreateRootSignature");
+        return result;
+    }
+
+    ComPtr<ID3D12PipelineState> MakePipeline(ID3D12RootSignature* signature, const fs::path& path) {
+        auto code = ReadFile(path);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
+        pso.pRootSignature = signature;
+        pso.CS.pShaderBytecode = code.data();
+        pso.CS.BytecodeLength = code.size();
+        ComPtr<ID3D12PipelineState> pipeline;
+        Check(device_->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline)),
+              "CreateComputePipelineState");
+        return pipeline;
+    }
+
+    D3D12_RESOURCE_DESC BufferDesc(uint64_t size) const {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = size;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        return desc;
+    }
+
+    D3D12_RESOURCE_DESC TextureDesc(const Binding& b) const {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = b.width;
+        desc.Height = b.height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.Format = b.format;
+        desc.SampleDesc.Count = 1;
+        return desc;
+    }
+
+    GpuBuffer Upload(uint64_t size, const void* data) {
+        GpuBuffer buffer;
+        buffer.size = Align(size);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC desc = BufferDesc(buffer.size);
+        Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                               IID_PPV_ARGS(&buffer.resource)),
+              "CreateCommittedResource(upload)");
+        Check(buffer.resource->Map(0, nullptr, &buffer.mapped), "Map(upload)");
+        std::memset(buffer.mapped, 0, buffer.size);
+        if (data) std::memcpy(buffer.mapped, data, static_cast<size_t>(size));
+        buffer.address = buffer.resource->GetGPUVirtualAddress();
+        return buffer;
+    }
+
+    GpuBuffer CommittedBuffer(uint64_t size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state,
+                              bool uav) {
+        GpuBuffer buffer;
+        buffer.size = Align(size);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = type;
+        D3D12_RESOURCE_DESC desc = BufferDesc(buffer.size);
+        if (uav) desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                                               IID_PPV_ARGS(&buffer.resource)),
+              "CreateCommittedResource(buffer)");
+        buffer.address = buffer.resource->GetGPUVirtualAddress();
+        return buffer;
+    }
+
+    GpuBuffer CommittedTexture(const Binding& b, D3D12_RESOURCE_STATES state) {
+        GpuBuffer texture;
+        texture.size = b.bytes;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC desc = TextureDesc(b);
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr,
+                                               IID_PPV_ARGS(&texture.resource)),
+              "CreateCommittedResource(texture)");
+        return texture;
+    }
+
+    // A linear buffer big enough for one texture copy, with the footprint the
+    // runtime chose.  Its row pitch is what the file conversion below uses.
+    GpuBuffer TextureStaging(const Binding& b, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state) {
+        D3D12_RESOURCE_DESC desc = TextureDesc(b);
+        UINT rows = 0;
+        UINT64 rowBytes = 0, total = 0;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &rowBytes, &total);
+        return CommittedBuffer(total, type, state, false);
+    }
+
+    // One row-major upload buffer, filled through D3D12's own copyable footprint.
+    GpuBuffer UploadTexture(const Binding& b) {
+        D3D12_RESOURCE_DESC desc = TextureDesc(b);
+        UINT rows = 0;
+        UINT64 rowBytes = 0, total = 0;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &rowBytes, &total);
+        GpuBuffer staging = CommittedBuffer(total, D3D12_HEAP_TYPE_UPLOAD,
+                                            D3D12_RESOURCE_STATE_GENERIC_READ, false);
+        GpuBuffer texture = CommittedTexture(b, D3D12_RESOURCE_STATE_COPY_DEST);
+        void* mapped = nullptr;
+        Check(staging.resource->Map(0, nullptr, &mapped), "Map(texture staging)");
+        const uint32_t srcRow = b.width * b.pixelBytes;
+        for (uint32_t y = 0; y < b.height; ++y) {
+            std::memcpy(static_cast<uint8_t*>(mapped) + footprint.Offset + y * footprint.Footprint.RowPitch,
+                        b.data.data() + size_t(y) * srcRow, srcRow);
+        }
+        staging.resource->Unmap(0, nullptr);
+        std::printf("texture %ux%u %s: %u rows, row pitch %u, %llu bytes\n", b.width, b.height,
+                    b.formatName.c_str(), rows, footprint.Footprint.RowPitch,
+                    static_cast<unsigned long long>(total));
+
+        Check(allocator_->Reset(), "Reset(allocator)");
+        Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = staging.resource.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = texture.resource.Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        to.SubresourceIndex = 0;
+        list_->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture.resource.Get();
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list_->ResourceBarrier(1, &barrier);
+        Check(list_->Close(), "Close(upload list)");
+        ID3D12CommandList* lists[] = {list_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
+        Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
+        WaitForSingleObject(event_, INFINITE);
+        return texture;
+    }
+
+    void CopyOut(GpuBuffer& source, GpuBuffer& readback, const Binding& b) {
+        if (b.kind == Kind::Buffer) {
+            list_->CopyBufferRegion(readback.resource.Get(), 0, source.resource.Get(), 0, b.bytes);
+            return;
+        }
+        D3D12_RESOURCE_DESC desc = TextureDesc(b);
+        UINT rows = 0;
+        UINT64 rowBytes = 0, total = 0;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &rowBytes, &total);
+        D3D12_TEXTURE_COPY_LOCATION from{};
+        from.pResource = source.resource.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        from.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION to{};
+        to.pResource = readback.resource.Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint = footprint;
+        list_->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+    }
+
+    void Gather(GpuBuffer& readback, const Binding& b, uint8_t* out) {
+        void* mapped = nullptr;
+        Check(readback.resource->Map(0, nullptr, &mapped), "Map(readback)");
+        if (b.kind == Kind::Buffer) {
+            std::memcpy(out, mapped, static_cast<size_t>(b.bytes));
+        } else {
+            D3D12_RESOURCE_DESC desc = TextureDesc(b);
+            UINT rows = 0;
+            UINT64 rowBytes = 0, total = 0;
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &rowBytes, &total);
+            const uint32_t row = b.width * b.pixelBytes;
+            for (uint32_t y = 0; y < b.height; ++y) {
+                std::memcpy(out + size_t(y) * row,
+                            static_cast<const uint8_t*>(mapped) + footprint.Offset +
+                                size_t(y) * footprint.Footprint.RowPitch,
+                            row);
+            }
+        }
+        readback.resource->Unmap(0, nullptr);
+    }
+
+    ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12CommandQueue> queue_;
+    ComPtr<ID3D12CommandAllocator> allocator_;
+    ComPtr<ID3D12GraphicsCommandList> list_;
+    ComPtr<ID3D12Fence> fence_;
+    HANDLE event_ = nullptr;
+    uint64_t fenceValue_ = 0;
+};
+
+int Run(int argc, char** argv) {
+    fs::path manifest, outputDir = ".", shaderDir;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--fixture" && i + 1 < argc) manifest = argv[++i];
+        else if (arg == "--out" && i + 1 < argc) outputDir = argv[++i];
+        else if (arg == "--shaders" && i + 1 < argc) shaderDir = argv[++i];
+        else throw std::runtime_error("unknown option " + arg);
+    }
+    if (manifest.empty()) {
+        std::fprintf(stderr,
+                     "usage: m_image_stage --fixture stage.txt [--out DIR] [--shaders DIR]\n");
+        return 2;
+    }
+    Fixture fixture = Parse(manifest, shaderDir);
+    Runner runner;
+    runner.Run(fixture, outputDir);
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return Run(argc, argv);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "FAIL %s\n", error.what());
+        return 1;
+    }
+}

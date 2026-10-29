@@ -29,7 +29,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M02 | Reference Acquisition | COMPLETE | PASS |
 | M03 | Preset M Architecture Reconstruction | COMPLETE | PASS |
 | M04 | Numerical Contract Analysis | COMPLETE | PASS |
-| M05 | FP16 Oracle Reproduction | BLOCKED | BLOCKED |
+| M05 | FP16 Oracle Reproduction | IN PROGRESS | PENDING |
 | M06 | Operator-Level Reconstruction Probes | COMPLETE | PASS |
 | M07 | INT8 Quantization Feasibility | COMPLETE | PASS |
 | M08 | RDNA 3 Native INT8 Probes | COMPLETE | PASS |
@@ -42,7 +42,10 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase II: M06-M08 pass, M05 is capture-complete for buffers **and** images and remains oracle-blocked on reconstruction. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured weight set was quantized to INT8 at five scaling scopes ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408 values, with per-column 16-row K blocks best (0.0048 RMS) and the activation term now co-dominant. M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)), and the same hook now dumps the textures and surfaces those stages bind ([EXP-011](experiments/EXP-011-m05-image-capture.md)) — 33 image targets whose pre/post contents reproduce stage edges and the final frame exactly. Its remaining blocker is execution: the FP16 oracle must be reconstructed natively, because d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit. M05 therefore stays BLOCKED at C11 while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase II: M06-M08 pass, M05 is capture-complete for buffers **and** images and its
+reconstruction is now in progress: `downsample`, the last launch of the frame, executes
+natively and reproduces its captured surface byte for byte
+([EXP-012](experiments/EXP-012-m05-native-downsample.md)). Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured weight set was quantized to INT8 at five scaling scopes ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408 values, with per-column 16-row K blocks best (0.0048 RMS) and the activation term now co-dominant. M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)), and the same hook now dumps the textures and surfaces those stages bind ([EXP-011](experiments/EXP-011-m05-image-capture.md)) — 33 image targets whose pre/post contents reproduce stage edges and the final frame exactly. Its remaining work is execution: the FP16 oracle must be reconstructed natively, because d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit. The Windows-native path is therefore the oracle, one stage at a time, and `downsample` already reproduces its captured surface exactly ([EXP-012](experiments/EXP-012-m05-native-downsample.md)); C11 stays open while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -193,20 +196,22 @@ Understand the numerical behavior of the reference implementation.
 
 ## M05 — FP16 Oracle Reproduction
 
-**Status:** BLOCKED / BLOCKED
+**Status:** IN PROGRESS / PENDING
 
-**Blocker:** The oracle is now purely a reconstruction task. Capture coverage is complete at
-1920x1080, including the textures and surfaces that `enc0`, `dec0`, `post` and `downsample`
-bind: 33 image targets with geometry, format, pitch and pre/post contents
-([EXP-011](experiments/EXP-011-m05-image-capture.md)). `downsample`'s captured output array
-is byte-identical to the probe's independent D3D12 readback of the final frame, `dec0`'s
-four surfaces match `dec0_m.comp` and feed `post` byte for byte, and four temporal chains
-hold across 24 frame pairs. The graph, the 360 weight matrices and the whole token chain were
-already confirmed (14 launches, 14/14 buffer edges). What remains is implementing `enc0`,
-`dec0`'s epilogue, `post` and `downsample` natively and comparing them stage by stage
-(C1-C3), then the ten-layer native chain (C20) and the full frame (C21). A D3D12/HLSL path
-exists and reproduces the published accumulator contract on a real stage
-([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)).
+**Status:** The dependency that made this milestone `BLOCKED` is gone: capture coverage is
+complete at 1920x1080, including the textures and surfaces that `enc0`, `dec0`, `post` and
+`downsample` bind - 33 image targets with geometry, format, pitch and pre/post contents
+([EXP-011](experiments/EXP-011-m05-image-capture.md)) - and the remaining work is
+reconstruction, which is now underway. `downsample` is reconstructed natively and reproduces
+its captured surface byte for byte, together with the fixture infrastructure that executes a
+launch from its recorded formats, geometry, pitch, parameter block and dispatch
+([EXP-012](experiments/EXP-012-m05-native-downsample.md)). Still open: `dec0`'s epilogue,
+`enc0`, `post`, the numerical conformance write-up, the ten-layer native chain (C20) and the
+full frame (C21). `downsample`'s captured output array is byte-identical to the probe's
+independent D3D12 readback of the final frame, `dec0`'s four surfaces match `dec0_m.comp`
+and feed `post` byte for byte, and four temporal chains hold across 24 frame pairs. The
+graph, the 360 weight matrices and the whole token chain were already confirmed (14
+launches, 14/14 buffer edges).
 
 ### Objective
 
@@ -231,7 +236,15 @@ Establish a deterministic reference execution path.
 - [x] B1 (C16): Capture completeness audit — 14 launches, 14/14 buffer edges confirmed by byte-identical tensor content, arena map established, and the image-bound stages identified as uncaptured ([stage graph](../findings/2026-10-29-m05-stage-graph.md)). Extended by the image capture below: every texture and surface those stages bind is now dumped, so the audit covers both resource kinds ([EXP-011](experiments/EXP-011-m05-image-capture.md)).
 - [x] B2 (C17): Explicit variant support — `m_weights.parse_kernel()` keeps `motion`/`range`/`folded` as separate fields, tests pin the grammar, and static PTX evidence shows `mvlo`/`mvhi` share the weight-block geometry but not their code ([stage graph](../findings/2026-10-29-m05-stage-graph.md)).
 - [x] B3 (C18): Windows execution foundation — D3D12 compute path in `src/native/` with DXC compilation, typed-buffer descriptor tables, upload/readback heaps, one fence, and error reporting; one real stage dispatches and reads back ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)).
-- [ ] B4 (C19): Input/output stage reconstruction — the capture side is done: `enc0`, `dec0`, `post` and `downsample` bind 33 image targets with geometry, format, pitch, pre/post contents and content-verified in-frame edges, and `downsample`'s output equals the probe's D3D12 readback byte for byte ([EXP-011](experiments/EXP-011-m05-image-capture.md)). What remains is the reconstruction itself: `enc0` (C1), `dec0`'s four-surface epilogue (C2; its matrix stage already matches the published step chain, 97.9% bit-identical), and `post`/`downsample` (C3).
+- [ ] B4 (C19): Input/output stage reconstruction — **in progress**. B4.1 (fixture
+  infrastructure) and B4.2 (native `downsample`) are done: a captured launch executes from
+  its own recorded formats, geometry, pitch, parameter block and dispatch, a representative
+  set of 8 captured resources round-trips through D3D12 unchanged, and native `downsample`
+  reproduces the captured surface **byte for byte** — 16 588 800 of 16 588 800 bytes,
+  0 differing, two runs identical ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
+  Remaining: `dec0`'s four-surface epilogue (B4.3; its matrix stage already matches the
+  published step chain, 97.9% bit-identical), `enc0` (B4.4), `post` (B4.5), the numerical
+  conformance write-up (B4.6), and the shared comparison suite (B4.7, partly in place).
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
@@ -242,7 +255,16 @@ Reference execution is reproducible, and captured outputs are suitable for diffe
 
 **Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
-**Full-network gate: BLOCKED** — capture coverage is complete for both resource kinds: buffers ([stage graph](findings/2026-10-29-m05-stage-graph.md)) and images ([EXP-011](experiments/EXP-011-m05-image-capture.md)), with two independent oracles agreeing with the captured images. The Windows-native path has started: one real matrix stage executes on D3D12 and reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)). What remains is the reconstruction itself (B4-B6) and temporal validation (B7, now possible: four temporal chains hold over 24 frame pairs). C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Full-network gate: PENDING** - capture coverage is complete for both resource kinds:
+buffers ([stage graph](findings/2026-10-29-m05-stage-graph.md)) and images
+([EXP-011](experiments/EXP-011-m05-image-capture.md)), with two independent oracles agreeing
+with the captured images. The Windows-native reconstruction is in progress: one matrix stage
+reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md))
+and `downsample` now reproduces its captured surface byte for byte, with the fixture path
+that executes a captured launch natively ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
+What remains is `dec0`'s epilogue, `enc0`, `post` (B4), the ten-layer native chain (B5), the
+full frame (B6) and temporal validation (B7, now possible: four temporal chains hold over 24
+frame pairs). C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
