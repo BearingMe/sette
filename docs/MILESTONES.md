@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase II is closing: M06, M07 and M08 pass. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and real captured weights were quantized to INT8 at four scaling scopes with per-channel winning ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). M05 remains BLOCKED at the full-network gate: the ten layers replay bit-exactly ([EXP-003](experiments/EXP-003-m05-layer-capture.md)), the coverage audit is complete ([finding](findings/2026-10-29-m05-capture-coverage.md)), and `enc0`/`dec0` capture needs the ZLUDA-internal rebuild described in [EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md). M09 is unblocked by M06-M08 but has not started. Phase I evidence remains: the Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase II: M06-M08 pass, M05 is capture-complete but oracle-blocked. Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and real captured weights were quantized to INT8 at four scaling scopes with per-channel winning ([EXP-007](experiments/EXP-007-m07-int8-feasibility.md)). M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)). Its remaining blocker is an execution path for the full FP16 oracle — d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit — so M05 stays BLOCKED at C11 while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 
 ---
 
@@ -195,7 +195,7 @@ Understand the numerical behavior of the reference implementation.
 
 **Status:** BLOCKED / BLOCKED
 
-**Blocker:** A complete model needs `enc0` and `dec0` weight captures, which the Windows ZLUDA replay hook omits; post/downsample tensor capture is needed only for full intermediate validation. The coverage audit classifies every missing group and gives the exact whitelist additions ([finding](../findings/2026-10-29-m05-capture-coverage.md)). A layer-level oracle is established: ten real-weight layers were captured from the pinned DLL and replayed bit-exactly against the captured GPU outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and capture options are in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Blocker:** Capture coverage is now complete: every stage group (`enc0`, the ten layers, `dec0`, `post_3_1`, `downsample_kernel`) dumps in one frame at 1920x1080, and the `enc0`/`dec0` weight blobs decode with d4r's layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). What remains for C11 is an oracle execution path: d4r's full-frame oracle is a Linux/Vulkan build (`test_frame_m.py` with `kvk`/`evk`) and does not run on this Windows host, and `compile_m.py` expects the `mvlo` input variant while the synthetic probe produces `mvhi`. A layer-level oracle is established: ten real-weight layers replay bit-exactly ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and capture options are in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Objective
 
@@ -205,15 +205,15 @@ Establish a deterministic reference execution path.
 
 - [ ] C01: Build or execute d4r's relevant standalone engine.
 - [x] C02: Pin the model and source revision (d4r `05e19d4`; Windows capture tooling `7da2f9a`; local DLL 310.7.0).
-- [ ] C03: Establish one fixed output resolution and quality setting supported by the reference path.
+- [x] C03: Establish one fixed output resolution and quality setting supported by the reference path (1920x1080 output, quality mode, preset 13; `output-0.rgba16f` captured at that geometry).
 - [x] C04: Prepare deterministic inputs (captured layer inputs; fixed 256x144 probe frame).
 - [x] C05: Capture final outputs (ten layer outputs, `gpu-output/`; frame `output-0.rgba16f`).
 - [x] C06: Capture intermediate tensors where accessible (layer inputs, weights, and outputs).
 - [x] C07: Establish repeatability and tolerance requirements (two native replays byte-identical; exact tolerance).
 - [x] C08: Identify nondeterministic behavior, if any (none observed at layer scope).
 - [x] C09: Capture coverage audit: map the M dispatches against the ZLUDA whitelist and classify the missing groups by weights versus tensors ([finding](../findings/2026-10-29-m05-capture-coverage.md)).
-- [ ] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors. A probe-side MinHook attempt was installed but observed zero NGX launches because the internal ZLUDA graph path bypasses exported CUDA entry points ([EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md)); a ZLUDA-internal rebuild is required.
-- [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression.
+- [x] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors. Done by rebuilding ZLUDA with the four whitelist groups; every stage group now dumps in one frame at 1920x1080 and the `enc0`/`dec0` weight blobs decode with d4r's own layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). The earlier probe-side MinHook attempt failed and is recorded in [EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md).
+- [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression. Two dependencies are open: `compile_m.py` names the input stage `rrlite_enc0_4x4_mvlo_{hdr,ldr}_folded` and the synthetic probe produces the `mvhi` variant, and d4r's full-frame oracle (`test_frame_m.py`, `kvk`/`evk`) is a Linux/Vulkan build, so no oracle execution path exists on Windows yet.
 
 ### Validation Gate
 
@@ -221,7 +221,7 @@ Reference execution is reproducible, and captured outputs are suitable for diffe
 
 **Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
-**Full-network gate: BLOCKED** — coverage audit complete ([finding](../findings/2026-10-29-m05-capture-coverage.md)); `enc0`/`dec0` weights remain uncaptured because the Windows ZLUDA whitelist omits those kernels. C10 and C11 are open. See [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Full-network gate: BLOCKED** — capture coverage is complete and the `enc0`/`dec0` weights are real ([EXP-008](experiments/EXP-008-m05-full-capture.md)), but the full-network oracle still needs an execution path: d4r's frame oracle is Linux/Vulkan-only, and `compile_m.py` requires the `mvlo` input variant that the synthetic probe does not produce. C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
