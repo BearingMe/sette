@@ -195,7 +195,7 @@ Understand the numerical behavior of the reference implementation.
 
 **Status:** BLOCKED / BLOCKED
 
-**Blocker:** Capture coverage is now complete: every stage group (`enc0`, the ten layers, `dec0`, `post_3_1`, `downsample_kernel`) dumps in one frame at 1920x1080, and the `enc0`/`dec0` weight blobs decode with d4r's layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). What remains for C11 is an oracle execution path: d4r's full-frame oracle is a Linux/Vulkan build (`test_frame_m.py` with `kvk`/`evk`) and does not run on this Windows host, and `compile_m.py` expects the `mvlo` input variant while the synthetic probe produces `mvhi`. A layer-level oracle is established: ten real-weight layers replay bit-exactly ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). The full-model gap and capture options are in [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Blocker:** Capture coverage is complete: every stage group (`enc0`, the ten layers, `dec0`, `post_3_1`, `downsample_kernel`) dumps in one frame at 1920x1080, and the `enc0`/`dec0` weight blobs decode with d4r's layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). The graph is confirmed from the capture itself: 14 launches, every buffer-mediated edge byte-identical ([stage graph](findings/2026-10-29-m05-stage-graph.md)). The oracle is now a reconstruction task: a D3D12/HLSL path exists and reproduces the published accumulator contract on a real stage ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)), but `enc0`, `dec0`, `post` and `downsample` read or write textures whose contents this capture format does not record, so their stage-level validation needs a capture extension. A layer-level oracle is established: ten real-weight layers replay bit-exactly ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
 ### Objective
 
@@ -215,13 +215,23 @@ Establish a deterministic reference execution path.
 - [x] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors. Done by rebuilding ZLUDA with the four whitelist groups; every stage group now dumps in one frame at 1920x1080 and the `enc0`/`dec0` weight blobs decode with d4r's own layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). The earlier probe-side MinHook attempt failed and is recorded in [EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md).
 - [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression. Two dependencies are open: `compile_m.py` names the input stage `rrlite_enc0_4x4_mvlo_{hdr,ldr}_folded` and the synthetic probe produces the `mvhi` variant, and d4r's full-frame oracle (`test_frame_m.py`, `kvk`/`evk`) is a Linux/Vulkan build, so no oracle execution path exists on Windows yet.
 
+### Extension checkpoints: Windows-native oracle (task C16-C22)
+
+- [x] B1 (C16): Capture completeness audit — 14 launches, 14/14 buffer edges confirmed by byte-identical tensor content, arena map established, and the image-bound stages identified as uncaptured ([stage graph](../findings/2026-10-29-m05-stage-graph.md)).
+- [x] B2 (C17): Explicit variant support — `m_weights.parse_kernel()` keeps `motion`/`range`/`folded` as separate fields, tests pin the grammar, and static PTX evidence shows `mvlo`/`mvhi` share the weight-block geometry but not their code ([stage graph](../findings/2026-10-29-m05-stage-graph.md)).
+- [x] B3 (C18): Windows execution foundation — D3D12 compute path in `src/native/` with DXC compilation, typed-buffer descriptor tables, upload/readback heaps, one fence, and error reporting; one real stage dispatches and reads back ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)).
+- [ ] B4 (C19): Input/output stage reconstruction — `dec0`'s matrix stage matches the published step chain (97.9% of values bit-identical, all within one f16 step), but the four-surface epilogue, and all of `enc0`/`post`/`downsample`, cannot be validated stage-by-stage because their operands and outputs are textures the capture does not contain.
+- [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
+- [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
+- [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
+
 ### Validation Gate
 
 Reference execution is reproducible, and captured outputs are suitable for differential testing with repeatability/tolerance criteria recorded.
 
 **Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
-**Full-network gate: BLOCKED** — capture coverage is complete and the `enc0`/`dec0` weights are real ([EXP-008](experiments/EXP-008-m05-full-capture.md)), but the full-network oracle still needs an execution path: d4r's frame oracle is Linux/Vulkan-only, and `compile_m.py` requires the `mvlo` input variant that the synthetic probe does not produce. C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Full-network gate: BLOCKED** — capture coverage is complete and the `enc0`/`dec0` weights are real ([EXP-008](experiments/EXP-008-m05-full-capture.md)), and the stage graph is now confirmed edge-by-edge from tensor content ([stage graph](findings/2026-10-29-m05-stage-graph.md)). The Windows-native path has started: one real matrix stage executes on D3D12 and reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md)). What remains is the reconstruction itself (B4-B6), and a known capture gap: `enc0`, `dec0`, `post` and `downsample` bind textures/surfaces whose contents the capture format does not record, so only their effect on the final frame can be validated until the hook dumps image memory. C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
 
 ### Expected Deliverables
 
