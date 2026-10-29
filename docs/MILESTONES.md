@@ -265,9 +265,17 @@ Establish a deterministic reference execution path.
   [EXP-016](experiments/EXP-016-m05-post-reconstruction.md). Two of its three outputs needed a
   conversion the PTX does not show (the f16 surface truncates; the half-resolution surface is
   10-bit and holds exact `k/1023`), and the odd row of each thread's row pair keeps the even
-  row's texels. Remaining: the numerical conformance write-up (B4.6, now the home of the
-  ULP-level residuals) and the shared comparison suite (B4.7, partly in place). The history
-  branch of `dec0` (frames with `reset = 0`) and of `post` is not implemented.
+  row's texels. B4.6 (numerical fidelity) is **done**: `dec0`'s residual is classified as
+  E4M3 boundary flips - every differing covariance/gate sample matches the activation table
+  exactly one code from the reference, the four surfaces' differing pixels are disjoint
+  because they consume disjoint expansion columns, and no storage-conversion bias exists -
+  and its propagation is measured: substituted into `post` and `downsample`, the 0.23% of
+  `dec0` pixels becomes 0.064% of the final frame's samples at a median of 1 f16 ULP, while
+  the same chain from captured inputs stays byte-exact. Acceptance floors for the FP16 oracle
+  (per surface and end to end, plus three structural invariants) are executable in
+  `scripts/m_conformance.py`, [EXP-017](experiments/EXP-017-m05-dec0-fidelity.md). The
+  remaining work is B4.7 (the shared comparison suite, partly in place). The history branch
+  of `dec0` (frames with `reset = 0`) and of `post` is not implemented.
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
