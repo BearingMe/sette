@@ -27,7 +27,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 |---|---|---|---|
 | M01 | Project Initialization | COMPLETE | PASS |
 | M02 | Reference Acquisition | COMPLETE | PASS |
-| M03 | Preset M Architecture Reconstruction | NOT STARTED | PENDING |
+| M03 | Preset M Architecture Reconstruction | COMPLETE | PASS |
 | M04 | Numerical Contract Analysis | NOT STARTED | PENDING |
 | M05 | FP16 Oracle Reproduction | NOT STARTED | PENDING |
 | M06 | Operator-Level Reconstruction Probes | NOT STARTED | PENDING |
@@ -42,7 +42,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase I reconnaissance is complete: M01 and M02 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05. No milestone after M02 has started.
+Phase I is at M03: the M01-M03 gates pass. The Windows/D3D12/DXC toolchain and the pinned quattro WMMA reference were built and executed on this workstation ([EXP-001](experiments/EXP-001-reference-toolchain.md)), all requested references are pinned and inspected, and the Preset M artifact gaps are documented in [`findings/2026-10-28-reference-inventory.md`](findings/2026-10-28-reference-inventory.md). The Preset M graph, stage contracts, and buffer/temporal dependencies are recorded in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md), based on d4r source inspection. M04 (numerical contract analysis) is next. d4r's Linux/Vulkan/HIP oracle build remains unverified and is deferred to M05.
 
 ---
 
@@ -120,25 +120,29 @@ All accessible primary references are pinned, indexed, and traceable; inaccessib
 
 ## M03 — Preset M Architecture Reconstruction
 
+**Status:** COMPLETE / PASS
+
 ### Objective
 
 Understand the complete neural execution graph.
 
 ### Checkpoints
 
-- [ ] C01: Identify all major network stages.
-- [ ] C02: Inventory operators and matrix multiplication sites.
-- [ ] C03: Determine tensor shapes and layouts.
-- [ ] C04: Identify attention, normalization, and residual operations.
-- [ ] C05: Trace patch merging and reconstruction stages.
-- [ ] C06: Map intermediate buffers and execution dependencies.
-- [ ] C07: Identify temporal inputs, outputs, and persistent state.
-- [ ] C08: Record original precision and scaling where observable.
-- [ ] C09: Distinguish architectural facts from inferred behavior and gaps.
+- [x] C01: Identify all major network stages: exposure, enc0 tokenization, ten Swin layers, dec0 expansion, post reconstruction, and static 3-to-2 downsample.
+- [x] C02: Inventory operators and matrix multiplication sites: Q/V projections, `Q Q^T`, `P V`, output projection, per-chunk MLP, patch merge/expand, and the input/expansion GEMMs.
+- [x] C03: Determine tensor shapes and layouts: token grids derive from render extent rounded to 32 pixels (`/2` tokens, `/8` tube), with 64/96/128 channels, 2/4 heads, pair-ordered memory, and FP8 plane storage.
+- [x] C04: Identify attention, normalization, and residual operations: 16-token window attention with relative bias, two RMS norms per block, two f16 residual streams, and the encoder/decoder skip paths.
+- [x] C05: Trace patch merging and reconstruction: `4C -> NPM` merges at half token resolution, `CIN -> 4C` expands with encoder skips, and dec0's four render-resolution surfaces feed post's Gaussian splat and temporal blend.
+- [x] C06: Map intermediate buffers and execution dependencies: `tokens`, `skip1/2`, `merged1/2`, tube ping-pong buffers, `dec2Out`, `dec1Out`, and the reconstruction surfaces.
+- [x] C07: Identify temporal inputs, outputs, and persistent state: current/previous motion, jitter, exposure, reset, two history images, previous feature, and the half-resolution history.
+- [x] C08: Record original precision and scaling where observable: FP8 e4m3 weights and matrix operands, f16 vectors/accumulators, SNORM8 recurrent feature, and f32 reconstruction blend; details in the numerics finding.
+- [x] C09: Distinguish architectural facts from inferred behavior and gaps: established source facts, DLL entry-point observations, and unverified assumptions are separated in the finding.
 
 ### Validation Gate
 
-A traceable model graph and tensor contracts exist, with unresolved architectural gaps explicitly identified and claims supported by evidence.
+- [x] A traceable graph and tensor contracts exist, sourced to pinned d4r files: [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md).
+- [x] Each stage, layer, channel count, token scale, and buffer binding is traced to `runtime_m.inc`, `M_NOTES.md`, `swin_model.py`, or the stage shaders.
+- [x] Unresolved gaps are explicit: no extracted weights, no local d4r execution, no local NGX launch, an unconfirmed per-frame shift schedule, and derived-only 1920x1080 Quality geometry.
 
 ### Expected Deliverables
 
