@@ -251,9 +251,14 @@ Establish a deterministic reference execution path.
   to the reference's own approximations and to E4M3 quantisation boundaries
   ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)). `dec0`'s operand and weight mapping is
   now traceable to the kernel's PTX rather than to a decode of d4r's model, and that map
-  replaces [EXP-013](experiments/EXP-013-m05-dec0-epilogue.md)'s blocker. Remaining: `enc0`
-  (B4.4), `post` (B4.5), the numerical conformance write-up (B4.6, now the home of the ULP-level
-  residuals) and the shared comparison suite (B4.7, partly in place). The history branch of
+  replaces [EXP-013](experiments/EXP-013-m05-dec0-epilogue.md)'s blocker. `enc0` (B4.4) is **in progress**: its resource and parameter contract, its 12 416-byte
+  blob layout (matrix, bias and dither) and its output field are established from the
+  kernel's PTX, and the `enc0` -> `enc1` edge is confirmed byte for byte, but the CPU
+  reconstruction of its 128 features does not yet reproduce the captured token field and no
+  native stage exists ([EXP-015](experiments/EXP-015-m05-enc0-contract.md)). Remaining:
+  the feature slot order (B4.4), `post` (B4.5), the numerical conformance write-up (B4.6,
+  now the home of the ULP-level residuals) and the shared comparison suite (B4.7, partly
+  in place). The history branch of
   `dec0` (frames with `reset = 0`) is not implemented.
 - [ ] B5 (C20): Neural network integration — the ten layers are validated at layer scope ([EXP-003](experiments/EXP-003-m05-layer-capture.md)) but not yet executed inside the native path.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
