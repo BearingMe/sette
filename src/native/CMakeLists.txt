@@ -40,6 +40,7 @@ set(SHADERS
     "image_copy_cs.hlsl|CopyBuf|image_copy_buf.cso"
     "downsample_cs.hlsl|main|downsample_cs.cso"
     "dec0_cs.hlsl|main|dec0_cs.cso"
+    "dec0_q8_epilogue_cs.hlsl|main|dec0_q8_epilogue.cso"
     "enc0_cs.hlsl|main|enc0_cs.cso"
     "post_cs.hlsl|main|post_cs.cso")
 
@@ -78,7 +79,7 @@ foreach(entry IN LISTS SHADERS)
         OUTPUT "${artifact}"
         COMMAND "${DXC_EXECUTABLE}" -T cs_6_2 -E "${entrypoint}" -O3
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
-        DEPENDS "${input}"
+        DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/dec0_cs.hlsl"
         COMMENT "dxc ${source}:${entrypoint} -> ${output}")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()

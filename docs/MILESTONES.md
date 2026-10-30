@@ -637,8 +637,10 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 ## M09 — INT8 Kernel Reconstruction
 
 **Status:** IN PROGRESS / PENDING — one projection is integrated in the live graph and
-validated bit for bit; dec0's full physical-layout expansion is independently
-validated in isolation. The representative-layer gate is still open.
+validated bit for bit; dec0's physical-layout expansion now feeds the original
+surface epilogue and a deterministic dec0-only hybrid frame
+([EXP-025](experiments/EXP-025-m09-dec0-int8-frame.md)). The representative-layer
+gate is still open.
 
 ### Objective
 
@@ -652,7 +654,8 @@ Implement the neural matrix operations required by Preset M.
   entry points, `dot4add_i8packed`, `cs_6_4`). Attention, MLP and the merge/expand
   matrices are not fully implemented. The isolated dec0 expansion now also executes
   over all 130,560 rows ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md));
-  its nonlinear/surface stage is not integrated with INT8.
+  its original nonlinear/surface stage now consumes that INT8 expansion through
+  an optional GPU-resident prefix (EXP-025); the other matrices remain unchanged.
 - [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
   per-column K-major f32 weights, both quantised to INT8 on the same word layout the
   graph uses. A second path now reads plane-major E4M3 directly on GPU and consumes
@@ -666,11 +669,12 @@ Implement the neural matrix operations required by Preset M.
 - [ ] C04: Support necessary floating-point operations and document each exception.
   **Partial:** the f32 epilogue (two multiplies) and the single f16 RNE conversion are
   documented; attention's own E4M3 re-quantisation of the Q output is recorded as the
-  next boundary, not implemented in INT8.
+  next boundary, not implemented in INT8. Dec0's E4M3 round-trip and floating-point
+  nonlinear/surface epilogue are preserved as explicit exceptions (EXP-025).
 - [ ] C05: Validate representative layers. **Open.** One of ten layers has been run
-  with one replaced projection; dec0's full expansion passes isolated C1–C4, but
-  its complete surface stage is not yet integrated. C5/C6 were deferred at the
-  buffer-graph/texture-runner boundary (EXP-024).
+  with one replaced projection. Dec0 now passes both captured/native-token stage
+  comparisons and a dec0-only hybrid frame; EXP-024's deferred C5/C6 boundary is
+  resolved in EXP-025. The MLP pair and other representative operators remain open.
 - [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
   **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
   with 8/8 independent scalar dot probes agreeing
@@ -685,7 +689,8 @@ Implement the neural matrix operations required by Preset M.
   out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
   for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
   Dec0 expansion: 0.5259% relative RMS vs native FP16, zero CPU/GPU implementation
-  error; no dec0 hybrid-frame result is claimed (EXP-024).
+  error (EXP-024). Dec0-only hybrid: 47.0249 dB vs canonical, direct hybrid-vs-FP16
+  62.9160 dB / RMS 0.000714826, 15 deterministic boundaries (EXP-025).
 
 ### Validation Gate
 
@@ -696,9 +701,10 @@ CPU INT8 references, and generated ISA confirms the intended native matrix arith
 bit-exact against the CPU reference, native ISA confirmed, one dispatch replaced, the
 rest of the graph byte-identical, the hybrid chain and frame deterministic and finite.
 The gate needs C05: more representative complete layer behavior and the MLP pair.
-The decoder expansion and plane-major operand now pass isolated C1–C4 (EXP-024);
-connecting that buffer graph to dec0's typed image outputs remains open. No milestone
-completion is inferred from two validated projections.
+The decoder expansion and plane-major operand pass isolated C1–C4 (EXP-024) and
+now feed dec0's typed image outputs and a full hybrid frame (EXP-025). No milestone
+completion is inferred from two independently integrated projections. Temporal
+fidelity and the existing B5 failure are unchanged.
 
 ### Expected Deliverables
 

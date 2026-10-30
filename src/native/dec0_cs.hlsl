@@ -245,6 +245,11 @@ float Column(uint ty, uint tx, uint n)
 // ---------------------------------------------------------------------------
 // epilogue
 
+// EXP-025 supplies only the expansion value; the default still calls Column.
+#ifndef DEC0_LOAD_COLUMN
+#define DEC0_LOAD_COLUMN Column
+#endif
+
 float Sigmoid(float v)
 {
     float c = Half(clamp(v, -20.0f, 20.0f));
@@ -295,7 +300,7 @@ void main(uint3 id : SV_DispatchThreadID)
         float v[20];
         [unroll]
         for (uint i = 0u; i < 20u; ++i)
-            v[i] = Half(E4M3Value(E4M3Code(Column(ty, tx, base + i))));
+            v[i] = Half(E4M3Value(E4M3Code(DEC0_LOAD_COLUMN(ty, tx, base + i))));
 
         int2 pix = int2(2 * int(tx) + int(sub & 1u), 2 * int(ty) + int(sub >> 1));
 

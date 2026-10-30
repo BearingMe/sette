@@ -147,6 +147,55 @@ def fail(message):
     raise SystemExit(f'error: {message}')
 
 
+DEC0_DIAGNOSTICS = {'q8a': 8355840, 'q8as': 522240, 'acc': 41779200,
+                    'float': 41779200, 'expansion': 20889600}
+
+
+def prepare_dec0_mode(directory, mode='fp16'):
+    """Select only dec0's expansion; no CPU activation processing on this path.
+
+    Call on a disposable copy of the existing fixture. FP16 is a byte-preserving
+    no-op. Experimental weights are prepared offline from the original blob.
+    """
+    from pathlib import Path
+    import hashlib
+    if mode == 'fp16':
+        return
+    if mode != 'int8-expansion':
+        raise ValueError(f'unknown dec0 mode: {mode}')
+    directory = Path(directory)
+    record = json.loads((directory / 'fixture.json').read_text())
+    if record['stage'] != 'dec0' or record['params']['size'] != [960, 544] or record['params']['reset'] != 1:
+        raise ValueError('INT8 dec0 requires the established 960x544 reset fixture')
+    import m09_dec0_expansion as ex
+    raw = (directory / 'in-weights.bin').read_bytes()
+    if len(raw) != 8448:
+        raise ValueError('dec0 weight extent mismatch')
+    blob = np.frombuffer(raw, np.uint8)
+    offsets = ex.mw.layout_offsets(ex.mw.front_end_layout('dec0'))
+    w = ex.mw.e4m3_decode(blob[offsets])[:, ex.LIVE]
+    bias = blob[8192:].copy().view('<f2')[ex.LIVE].astype('<f4')
+    if not (np.isfinite(w).all() and np.isfinite(bias).all()):
+        raise ValueError('non-finite dec0 weights or bias')
+    q = ex.m_int8.quantize(w, 'per_output_channel')
+    hashes = {'source_weights': hashlib.sha256(raw).hexdigest()}
+    for name, values in [('wc', q['codes'].T), ('ws', q['scales'].astype('<f4')), ('bias', bias)]:
+        data = np.ascontiguousarray(values).tobytes()
+        (directory / f'int8-{name}.bin').write_bytes(data)
+        hashes[name] = hashlib.sha256(data).hexdigest()
+    manifest = directory / 'stage.txt'
+    text = manifest.read_text()
+    if 'dec0_int8 ' in text or 'shader dec0_cs.cso' not in text:
+        raise ValueError('expected an unmodified FP16 dec0 fixture')
+    text = text.replace('shader dec0_cs.cso', 'shader dec0_q8_epilogue.cso')
+    text += 'dec0_int8 int8-wc.bin int8-ws.bin int8-bias.bin\n'
+    manifest.write_text(text)
+    record['dec0_mode'] = mode
+    record['int8_weights'] = hashes
+    record['int8_diagnostics'] = DEC0_DIAGNOSTICS
+    (directory / 'fixture.json').write_text(json.dumps(record, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # capture access
 

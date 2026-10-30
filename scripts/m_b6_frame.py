@@ -85,13 +85,16 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def run(probe, stage, out, shaders):
+def run(probe, stage, out, shaders, seed=None):
     if Path(out).is_dir():
         shutil.rmtree(out)
-    done = subprocess.run([str(probe), '--fixture', str(stage), '--out', str(out),
-                           '--shaders', str(shaders)], capture_output=True, text=True)
+    command = [str(probe), '--fixture', str(stage), '--out', str(out), '--shaders', str(shaders)]
+    if seed is not None:
+        command += ['--seed', str(seed)]
+    done = subprocess.run(command, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f'{stage}: {done.stdout[-600:]}{done.stderr[-600:]}')
+    (Path(out) / 'execution.log').write_text(done.stdout + done.stderr)
     return Path(out)
 
 
@@ -107,6 +110,9 @@ def declared_outputs(stage_txt):
     out = {}
     for line in Path(stage_txt).read_text().splitlines():
         words = line.split()
+        if words and words[0] == 'dec0_int8':
+            import m_stage_fixture as sf
+            out.update(sf.DEC0_DIAGNOSTICS)
         if not words or words[0] != 'uav':
             continue
         if words[1] == 'buffer':
@@ -149,11 +155,14 @@ def run_chain(network_probe, chain_dir, out, shaders):
     return Path(out) / 'out-dec1.bin'
 
 
-def image_stages(dec1, tag, out, probe, shaders):
+def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None):
     """dec0 -> post -> downsample, with the neural chain's dec1 as dec0's tokens."""
     dec0 = clone_fixture('dec0', out / f'dec0-{tag}')
     shutil.copyfile(dec1, dec0 / 'in-tokens.bin')
-    res0 = run(probe, dec0 / 'stage.txt', dec0 / 'results', shaders)
+    if dec0_mode != 'fp16':
+        import m_stage_fixture as sf
+        sf.prepare_dec0_mode(dec0, dec0_mode)
+    res0 = run(probe, dec0 / 'stage.txt', dec0 / 'results', shaders, seed=seed)
 
     post = clone_fixture('post', out / f'post-{tag}')
     for role in ('gate', 'mix', 'cov'):
@@ -297,6 +306,7 @@ def metrics(ref, test, border=32):
                           'BT.709 luma',
         'ssim_block8_luma_legacy': ssim_block8_luma(ref, test),
         'mean_abs': float(np.nanmean(absd)),
+        'rms': float(np.sqrt(mse)) if mse is not None else None,
         'p50_abs': float(np.nanpercentile(absd, 50)),
         'p99_abs': float(np.nanpercentile(absd, 99)),
         'max_abs': float(np.nanmax(absd)),
@@ -358,6 +368,8 @@ def input_manifest(a):
         layers[directory.name] = {p.name: sha(p) for p in sorted(directory.iterdir())
                                   if p.is_file()}
     return {'probe_sha256': sha(a.probe), 'network_probe_sha256': sha(a.network_probe),
+             'dec0_mode': getattr(a, 'dec0_mode', 'fp16'),
+             'q_mode': getattr(a, 'q_mode', 'fp16'),
             'shaders': {p.name: sha(p) for p in sorted(a.shaders.glob('*.cso'))},
             'fixtures': fixtures, 'layers': layers,
             'translated_dec1_capture': (str(a.translated_dec1_capture)
@@ -459,6 +471,11 @@ def verify_reuse(previous, manifest, hashes):
     return recorded
 
 
+def validate_precision_modes(q_mode, dec0_mode):
+    if q_mode != 'fp16' and dec0_mode != 'fp16':
+        raise SystemExit('combining enc1-Q and dec0 INT8 is not authorized for this experiment')
+
+
 def main():
     global FIXTURES, LAYERS
     ap = argparse.ArgumentParser(description=__doc__,
@@ -480,7 +497,11 @@ def main():
                     help='enc1 Q projection: the FP16 dispatch, or the INT8 pair')
     ap.add_argument('--enc1-int8', type=Path, default=None,
                     help='enc1 fixture containing the INT8 Q projection')
+    ap.add_argument('--dec0-mode', choices=['fp16', 'int8-expansion'], default='fp16')
+    ap.add_argument('--fp16-frame', type=Path, help='baseline raw RGBA16F frame for direct error')
+    ap.add_argument('--enc1q-frame', type=Path, help='enc1-Q-only raw RGBA16F control')
     a = ap.parse_args()
+    validate_precision_modes(a.q_mode, a.dec0_mode)
     FIXTURES, LAYERS = a.fixtures, a.layers
     for path in (a.probe, a.network_probe, a.shaders):
         if not path.exists():
@@ -497,6 +518,7 @@ def main():
     report = {'status': 'running', 'fixtures': str(FIXTURES), 'layers': str(LAYERS),
               'inputs': manifest, 'scripts': {'m_b6_frame.py': sha(__file__)},
               'q_mode': a.q_mode, 'enc1_int8': (str(a.enc1_int8) if a.enc1_int8 else None),
+              'dec0_mode': a.dec0_mode,
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
               'boundaries': {}, 'missing_outputs': []}
 
@@ -509,7 +531,9 @@ def main():
                     enc1_int8=a.enc1_int8)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                          a.shaders)
-        stages = image_stages(dec1, tag, a.out, a.probe, a.shaders)
+        stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
+                              dec0_mode=a.dec0_mode,
+                              seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None)
         full = {'enc0': {'fixture': FIXTURES / 'enc0', 'results': enc0},
                 'chain': {'file': dec1}, **stages['stages']}
         return {'tokens': tokens, 'dec1': dec1, 'frame': stages['frame'],
@@ -587,6 +611,16 @@ def main():
         report['comparisons'][name]['exports'] = export(a.out / f'frame-{name}', ref, test)
 
     native_frame = frame(native['frame'])
+    report['direct_comparisons'] = {}
+    for label, source in [('hybrid-vs-fp16', a.fp16_frame), ('hybrid-vs-enc1q', a.enc1q_frame)]:
+        if source is None:
+            continue
+        base = frame(source)
+        row = metrics(base, native_frame)
+        row['reference_path'] = str(source)
+        row['reference_sha256'] = sha(source)
+        row['exports'] = export(a.out / label, base, native_frame)
+        report['direct_comparisons'][label] = row
     report['chain_gap'] = {
         f'{name}-vs-native': metrics(native_frame, frame(path['frame']))
         for name, path in paths.items()}
