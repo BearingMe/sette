@@ -291,11 +291,39 @@ Establish a deterministic reference execution path.
   93.6-98.7% of the captured e4m3 codes (enc1 96.924%, enc2 96.890%, tube#1..#6
   96.376/98.586/97.899/98.745/97.221/93.584%, dec2 94.853%, dec1 95.365%), and the
   natural-order contract is bit-identical to the kernel-order model and to the shader.
-  It is **not byte-faithful**: the residual is a real 0.2-0.4% numerical difference (not
-  accumulation-order, not q8, not the RMS root), and it compounds - the chained native
+  It is **not byte-faithful**: historical alternate-arithmetic probes did not resolve
+  the numerical difference; they do not rule out runtime k32 rounding behavior. The chained native
   `dec1` matches only 21.327% of the captured field, below the 99% chain floor, so the
   `--network` gate fails. The blocker, the negative results (k16/k8/f32 accumulation) and
   the toolchain findings are in [EXP-019](experiments/EXP-019-m05-native-network.md).
+  **Reference-provenance correction:** the enc1-only investigation in EXP-019's
+  addendum verifies the window probe and finds original interpreted PTX agrees
+  with Sette in the tested blocks, while the canonical capture log selects a
+  d4r-native replacement (`translated_jit=skipped`). At that checkpoint the first
+  runtime-divergent operator was unknown. A subsequent enc1-only capture confirms actual
+  `backend=translated` dispatch of the original, hash-matched PTX in two fresh
+  runs, with byte-identical input/weights/output/merge. Against this reference,
+  Sette is 96.418337% output / 89.837910% merge; see EXP-019's translated-capture
+  addendum. Old conformance fixtures are preserved; no numerical fix is claimed.
+  A controlled pinned-source fast/conservative enc1 replay now finds canonical
+  output/merge **100% conservative-equivalent**, versus 30.537265% / 27.768650%
+  for fast. Sette remains 96.924307% / 91.287531% against conservative (H3).
+  Verified diagnostic blocks match through quantized norm1; the first Q/V k32
+  projection step diverges. Conservative also differs from translated PTX, so an
+  authoritative full-network numerical contract remains unresolved. Historical
+  routing is audited for all 14 launches; numerical build modes of the other
+  native modules are not certified. B4 reruns green at 99.9369%; B5 and its 99%
+  chain threshold are unchanged. See EXP-003 / EXP-019 contract-validation addenda.
+  **First-K32 follow-up:** raw original-PTX runtime fragments now prove identical
+  operands/C for one Q mismatch and an exact-window control. Sette matches the
+  translated result (`b014`); conservative returns `b013`. A replicated arithmetic
+  probe localizes native deviation before FP16 conversion, already in its first
+  K16 WMMA. Synthetic midpoints also distinguish translated rounding from exact
+  mathematical RNE; PTX leaves accumulation rounding/order unspecified. No CPU
+  or HLSL arithmetic correction is justified. Fresh ten-layer/chain measurements
+  are unchanged (21.3270% chained dec1, deterministic); B4 stays green and
+  204 tests pass. Original-hardware/internal-WMMA semantics remain unresolved;
+  see EXP-019's one-first-K32 addendum. B5 remains incomplete.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 

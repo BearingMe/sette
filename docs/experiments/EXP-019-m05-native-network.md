@@ -255,3 +255,635 @@ workspace.  The pinned d4r sources are read, never modified.
 - `scripts/m_layer_suite.py` — the ten layers, mode A and mode B
 - `scripts/m_conformance.py` — `--network` adds the B5 verdict
 - `tests/test_network_contract.py` — the capture-free contract tests
+
+## Addendum: enc1 divergence probe and reference provenance (2026-10-29)
+
+**Outcome: INCONCLUSIVE for the first divergent runtime operation; B5 remains
+incomplete.** No production arithmetic, weights, thresholds, or backend changed.
+The earlier description of the residual as an established per-token rounding
+error is too strong: that remains a hypothesis.
+
+### Verified mapping and reconstruction boundaries
+
+[M] `scripts/m_enc1_probe.py` selects complete interior 4x4 windows and verifies
+their input bytes by explicit allocation offsets, decoded field indexing, and
+`swin_model.load_tokens`. It also verifies fixture geometry and the entire packed
+weight buffer against the capture-derived matrices. Output comparison uses raw
+codes in the two physical channel planes, not decoded values or padded-grid
+reshaping. The previous ad-hoc perturbation probe is not used.
+
+| Selected window | Block (bx,by), window | Field coordinates | Mismatching codes |
+|---|---|---|---:|
+| Worst interior mismatch | (4,1), 3 | x=34..37, y=10..13 | 398 / 1024 |
+| Exact control | (2,2), 2 | x=14..17, y=18..21 | 0 / 1024 |
+
+[M] For both selected blocks, CPU and native dumps agree at **all nine** exposed
+boundaries: `x0,h1,q,v,o,x1,h2,x2,x2b`. The native enc1 output and merge are
+byte-identical across two executions with different scratch sentinel seeds.
+This establishes reconstruction consistency, **not original-kernel fidelity**.
+
+[M] Each token in both windows was independently perturbed by one f16 ULP in
+norm1 reciprocal, norm2 reciprocal, attention scale, and softmax reciprocal.
+There are 128 experiments per window. The largest improvement is token 61's
+softmax reciprocal +1 ULP: window mismatches 398 -> 357, with no newly wrong
+codes in that window; the token itself has one remaining wrong code. This is
+sensitivity evidence only. Other perturbations can regress exact control codes.
+No perturbation was promoted into the implementation.
+
+### Original PTX, interpreted rather than executed
+
+[R] Symbol search identifies `rrlite_enc1_4x4` in local
+`m-ptx-m05/dlss-0156-00.ptx` (not an assumed module index), SHA-256
+`f51bdc9e7b0e136865cc90ebdf1702614877a6cef65c387127038ac3e42e5a04`.
+The DLL hash is `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e`.
+Relevant bounded slices include:
+
+- norm1 f16-to-f32, `rsqrt.approx.ftz.f32`, RNE conversion back to f16:
+  lines 1204-1213;
+- attention scale f32 constants, `div.approx.ftz.f32`, RNE f16 conversion:
+  3197-3203;
+- clamped polynomial and two **fused** f16x2 instructions: 3207-3267;
+- MLP clamp/multiply/subtract/multiply/add/multiply, with separate f16x2
+  roundings: 8032-8094.
+
+[M] `scripts/m_enc1_ptx_probe.py` runs the pinned `ptxsim.py` directly on this
+PTX and the captured input allocation. For each selected block all 4096 ordinary
+output bytes are confirmed written. The interpreted PTX output is byte-identical
+to Sette's CPU model: **0 differences** in either block. Against the capture,
+the blocks differ by 464 and 37 bytes respectively (the control *window* is
+exact, not its whole block). The interpreter stops on its unsupported divergent
+backward branch at line 20505 during merge stores; **merge execution is partial
+and is not validated by this probe**. Approximate instructions are replaced by
+correctly-rounded operations in this interpreter. This is not NVIDIA runtime
+evidence and cannot rule out every hardware/lowering difference.
+
+[M] A D3D12-only diagnostic (`m_reciprocal_probe.py`,
+`reciprocal_probe_cs.hlsl`) evaluates `rsqrt` and `rcp` for all widened binary16
+arguments. For the 31,743 positive finite nonzero inputs, respectively 3,223 and
+2,746 results differ from correctly-rounded f32, but **zero differ after f16
+rounding**. This does not explain the residual, and does not prove what another
+compiler or runtime executed. Final-f32, sequential-f32 and pairwise-f32 P/V
+diagnostics also change no q8 attention codes in either selected block.
+
+### Critical correction: the canonical capture selected native replacements
+
+[M] The retained capture log
+`%TEMP%/opencode/m-capture-run/probe-1080b.log:510-516` identifies
+`d4r-runtime/d4r/native/gfx1101/rrlite_enc1_4x4.hsaco` and explicitly reports
+`module_direct kernel="rrlite_enc1_4x4" translated_jit=skipped`.
+The same log identifies native replacements for enc2 and the tube kernel.
+Thus the canonical enc1 reference is **d4r-native execution selected by ZLUDA**,
+not independent execution of the original NVIDIA PTX through its translator.
+
+[S] The local Windows source checkout is `7da2f9ac399404c23b2afe2dc26f245fca16fffb`;
+`external/ZLUDA/zluda/src/impl/function.rs:215-242` adjusts native launch geometry,
+launches the selected function and only then calls `replay.finish`. This explains
+why the recorded original launch dimensions alone do not establish the backend.
+The pinned mathematical sources remain `05e19d402781083118d106f2a21d0cf2bc43f744`.
+
+[R] REA rejected the replacement's GPU ELF as unsupported architecture; static
+inspection used installed ROCm `llvm-objdump -d --mcpu=gfx1101` instead. The
+currently installed module hashes to
+`aa5e403e0abdcc8299f265122fe37787da27e4217161bc39e147878ef8f6c6c1`.
+Its ISA has packed f16 polynomial FMAs (e.g. addresses 0x5994..0x5a00).
+The historical capture log binds a module **path**, not its historical hash;
+the current module must not be assumed byte-identical to the capture-time file.
+No HIP compilation, execution, or backend experiment was introduced here.
+
+This corrects the independence claim, not the measured byte comparisons in §6-7.
+Exact replay of a native replacement against output produced by that replacement
+does not establish original NVIDIA fidelity. The original PTX and Sette agree
+under the interpreter's semantics in the tested blocks; the first difference
+inside the actual capture-producing replacement remains **unknown**.
+
+### Reproduction, validation, and missing evidence
+
+All diagnostic data remains local under `%TEMP%/opencode/enc1-divergence-worst`,
+`enc1-divergence-control`, and `enc1-reciprocal`; no tensors, ISA, PTX, or modules
+are added to Git. With `CAPTURE`, `ENC1_FIXTURE`, `PTX` and `OUT` set to local paths:
+
+```powershell
+python scripts/m_enc1_probe.py CAPTURE ENC1_FIXTURE --out OUT --native --perturb
+python scripts/m_enc1_ptx_probe.py PTX CAPTURE --block 4 1 --out OUT
+python scripts/m_enc1_ptx_probe.py PTX CAPTURE --block 2 2 --out CONTROL_OUT
+python scripts/m_reciprocal_probe.py --out RECIPROCAL_OUT
+python -m unittest discover -s tests -p "test_*.py"
+python scripts/m_conformance.py
+```
+
+[M] **180 tests pass**, including three new coordinate regressions. B4 passes
+again, final frame 99.9369%. Native enc1 was rerun twice; no fidelity correction
+was made. The ten-layer suite/chain were not rerun because this investigation
+remains enc1-only and no shared fix exists. Their prior failed measurements and
+the 99% chain floor remain unchanged.
+
+Next independently verifiable action: obtain an enc1-only runtime reference that
+logs **translated** execution with the native replacement disabled (preserving
+this capture), or instrument the exact capture-producing replacement and bind
+its module hash to the trace. The required intermediate evidence is `h1`, Q/V,
+softmax probabilities/O, `x1`, `h2`, and MLP boundaries for the verified windows.
+Without either reference, naming the first runtime-divergent operation or changing
+Sette's arithmetic to fit these bytes would be guessing. Byte-exact enc1 and merge
+have **not** been achieved; B5 must not be closed.
+
+## Addendum: original enc1 translated execution captured (2026-10-29)
+
+**Capture validation: PASS. Numerical B5 status: unchanged/incomplete.**
+
+[M] `scripts/m_capture_translated_enc1.py` creates a fresh private native-module
+directory, removes only `rrlite_enc1_4x4` from its allowlist, and omits that code
+object. All other native modules are copied unchanged. Neither the installed
+runtime nor the old captures/fixtures are modified. A new process uses that
+directory with verbose dispatch logging and an enc1-only capture filter.
+
+Two fresh runs succeeded (`returncode=0`, `PASS D3D12_DLSS`, Preset 13, gfx1101):
+
+- `%TEMP%/opencode/enc1-translated-20261029/`
+- `%TEMP%/opencode/enc1-translated-20261029-repeat/`
+
+[M] The first `probe.log:370-372` records the allowlist miss and translated
+fallback; **line 459 confirms the actual dispatch**:
+
+```text
+[d4r-launch] kernel="rrlite_enc1_4x4" backend=translated grid=61,35,1 block=32,1,2
+```
+
+The enc1 capture begins at line 458 and completes at line 460. There is exactly
+one translated enc1 dispatch, zero native enc1 dispatches, and no enc1
+`module_direct` shortcut. Line 461 confirms enc2 remains `backend=native`.
+Thus this executes NVIDIA's original PTX **through ZLUDA on AMD**; it is not a
+claim about NVIDIA hardware execution. Other network layers remain replacements.
+
+[M] The dumped module is `ptx/module-246ed4dd4573ee6d-0000.ptx`, whose SHA-256 is
+`f51bdc9e7b0e136865cc90ebdf1702614877a6cef65c387127038ac3e42e5a04` in both runs:
+exactly the original enc1 PTX identified in the preceding investigation. The
+script records executable/DLL hashes, command and environment in `run.json`.
+Translation settings include WMMA/FP8 rewriting enabled, native FP8 disabled,
+and `D4R_ZLUDA_WMMA_F16_REFERENCE=1`; these are explicit properties of this
+ZLUDA reference, not proof of equivalence to NVIDIA tensor-core hardware.
+
+[M] Both runs have byte-identical enc1 input, weights, output and merge fields.
+The input and weights also match canonical `capture-1080b` exactly, so the
+new comparison is not confounded by a changed upstream tensor.
+
+| Field | Bytes | Native Sette vs translated capture | Old native-replacement reference vs translated capture |
+|---|---:|---:|---:|
+| enc1 output | 8,355,840 | 96.418337% (299,278 differ) | 98.491175% (126,075 differ) |
+| enc1 merge | 3,133,440 | 89.837910% (318,423 differ) | 94.394595% (175,642 differ) |
+
+The translated output-field SHA-256 is
+`1d99c4d685458fe50e28b243b5058409ee0a458895e8edeb5e84b2382d29f728`;
+merge is `dc8cbbf4d2c161bfa71bd6082e187788762768346a3042277c23c1f42ac33ecc`.
+These are hashes of the actual field ranges, not the entire arena. Local
+`comparison.json` and `repeat.json` retain the comparisons and repeat checks.
+
+Reproduce into a **new, nonexistent** output directory:
+
+```powershell
+python scripts/m_capture_translated_enc1.py --out NEW_LOCAL_DIRECTORY
+```
+
+The capture is under `capture/replay-000001-rrlite_enc1_4x4/`; its `args.bin`,
+manifest, input allocations and `gpu-output` allocations are preserved locally.
+No proprietary payload, PTX, code object or frame is tracked. The old reference
+was deliberately not replaced in the conformance fixtures. The next numerical
+probe can now use this independently routed enc1 output; original runtime
+intermediates and the first divergent operation are still unestablished.
+
+## Addendum: oracle provenance and controlled contract validation (2026-10-29)
+
+**Bounded enc1 comparison/localization: PASS. Authoritative original numerical
+contract: INCONCLUSIVE. B5: incomplete.** No production arithmetic was changed.
+
+### Question and controls
+
+Does the canonical reference use incompatible fast arithmetic, accounting for
+Sette's discrepancy? Build pinned conservative enc1 first, replay the existing
+input, then independently identify fast, conservative, Sette, and translated-PTX
+paths. Keep the 99% chain gate and all old fixtures unchanged.
+
+[S] Pinned source is clean at `05e19d402781083118d106f2a21d0cf2bc43f744`.
+`rrlite_enc1_4x4.hip:4-5` defines the fast macros; `swin_common.h:40-57`
+restores quantization and per-k32 half accumulation under `D4R_ACCURACY`.
+The default conservative `k32` at `swin_common.h:625-633` actually executes
+two FP16-operand/FP32-accumulator AMD WMMAs with C in the first, then converts
+to FP16. Its source label "exact" does not establish hardware exact-sum behavior
+or NVIDIA equivalence. Sette's CPU/HLSL contract uses an exact k32 product sum
+and accumulator with one RNE half rounding. These must be measured, not equated.
+
+[M] `scripts/m_enc1_contract.py` builds **separate** fast/conservative modules,
+checks effective preprocessed macros (accuracy must undefine both fast macros),
+and runs the explicit module path with `d4r_native_replay_probe.exe`. The probe
+loads that module directly with `hipModuleLoad`, resolves the intended kernel,
+runs its prep and dispatch, synchronizes and reads back the captured allocations.
+This bypasses ZLUDA override/cache selection entirely. Each log proves
+`grid=61,35,1 block=32,1,4` and successful module load/prep/dispatch. Each native
+mode runs in two fresh processes; Sette runs twice with different sentinel seeds.
+
+The installed ROCm 7.2 compiler initially failed on the newer
+`__builtin_elementwise_{minimum,maximum}num` spellings in the pinned merge clamp.
+No pinned file was changed. Both builds use explicit spelling aliases to the
+older `__builtin_elementwise_min/max`; a separate retained LLVM-IR probe verifies
+`llvm.minnum.v2f16` / `llvm.maxnum.v2f16`, without fast math. This is a documented
+toolchain compatibility adaptation, not a universal NaN/signed-zero conformance
+claim. All compared output fields are finite. An earlier device-function IR
+probe was optimized away; it was corrected with `used` before relying on it.
+
+### Execution identities
+
+Local final experiment: `%TEMP%/opencode/enc1-contract-final-20261029/`.
+`report.json` owns full commands, compiler identity, source hashes, binary hashes,
+effective macros, replay logs, capture/fixture hashes, Sette executable/shaders,
+field hashes and comparisons. The builds use gfx1101, C++17, `-O3`, device-only
+HIP, `--no-gpu-bundle-output`, and the pinned gfx1101
+`-DSWIN_BUFFER_BLOAD_FAST`; only conservative adds `-DD4R_ACCURACY`.
+
+| Explicitly executed binary | SHA-256 |
+|---|---|
+| Pinned conservative `rrlite_enc1_4x4.hsaco` | `dcf5b5727ee474d6da18e1ffc5e304a50503f2bcb8bcb7cbcfdd468220b7dad3` |
+| Pinned fast `rrlite_enc1_4x4.hsaco` | `113bf4bc6efad9aa644f370ae9f33ba8ac5c1a345d038fd02cc87f000c82852d` |
+| Sette `m_network_stage.exe` | `85c062a9efbe0377d895542cbc5db032b0c9783b8afe2f9bed9d453cbdf5b4ab` |
+
+[M] Input field SHA-256 is
+`aaf0801b8d4ece12f4c2575471ab05e13137757748557e13961e2544eabf54a2`;
+weight allocation SHA-256 is
+`8a36288ea3fbfa19a47723d4c549eaa440a733291ad4df0588df2467f8fdee97`.
+Both native paths consume exactly the same allocation files. The script also
+verifies Sette's `in.bin` equals this field and its packed weights equal the
+captured weights under the existing independently checked mapping. Translated
+PTX input and weight bytes are identical as well.
+
+| Execution | Output-field SHA-256 | Merge-field SHA-256 |
+|---|---|---|
+| Conservative (also canonical capture) | `5cbd013febb7ecbbcfc3f722f130567988cc9ad0ec02777e9e4f6991d602044a` | `46d9964621b3b5b87feea80b58fcb53ebc7571429fcf7438a04541171c5b721f` |
+| Fast | `00a0ddcea727a7a59ec58c59efde1390a02101e7732ae364cfef3d6eefb7a6be` | `43c90b0da8506fef553075bbb3881cab1c3111d43a5c85008b29e6012ed7ceb4` |
+| Sette | `ec2073d3f6a524facf0c25b4ac80be7e936c90156ea6e17522137236f595f114` | `2f4f018e62ed7a7984f578d8b35f8076f2eb0ed41f5fe5b6405b768763b5433f` |
+| Translated PTX | `1d99c4d685458fe50e28b243b5058409ee0a458895e8edeb5e84b2382d29f728` | `dc8cbbf4d2c161bfa71bd6082e187788762768346a3042277c23c1f42ac33ecc` |
+
+### Pairwise results
+
+[M] Fields contain 8,355,840 output codes and 3,133,440 merge codes. Relative
+RMS is `sqrt(mean((decoded_right-decoded_left)^2)/mean(decoded_left^2))` over
+finite pairs. Maximum is decoded absolute deviation, not unsigned code distance;
+this avoids treating sign-bit changes near zero as large numerical errors.
+
+| Left vs right | Field | Exact bytes | Differing codes | Relative RMS | Max decoded abs |
+|---|---|---:|---:|---:|---:|
+| Canonical vs fast | output | 30.537265% | 5,804,195 | 0.08738245 | 0.625 |
+| Canonical vs fast | merge | 27.768650% | 2,263,326 | 0.09530241 | 0.625 |
+| Canonical vs conservative | output | 100% | 0 | 0 | 0 |
+| Canonical vs conservative | merge | 100% | 0 | 0 | 0 |
+| Conservative vs Sette | output | 96.924307% | 257,000 | 0.01240001 | 0.5 |
+| Conservative vs Sette | merge | 91.287531% | 273,000 | 0.01942310 | 0.5 |
+| Fast vs Sette | output | 30.528840% | 5,804,899 | 0.08742528 | 0.625 |
+| Fast vs Sette | merge | 27.761406% | 2,263,553 | 0.09541363 | 0.625 |
+| Conservative vs translated PTX | output | 98.491175% | 126,075 | 0.00832049 | 0.5 |
+| Conservative vs translated PTX | merge | 94.394595% | 175,642 | 0.01461920 | 0.5 |
+| Fast vs translated PTX | output | 30.599808% | 5,798,969 | 0.08738918 | 0.625 |
+| Fast vs translated PTX | merge | 27.710695% | 2,265,142 | 0.09508899 | 0.625 |
+| Sette vs translated PTX | output | 96.418337% | 299,278 | 0.01335316 | 0.5 |
+| Sette vs translated PTX | merge | 89.837910% | 318,423 | 0.02110843 | 0.5 |
+
+Fast, conservative and Sette outputs/merge are deterministic across two runs.
+The conservative run additionally reproduces the **entire** historical output
+allocations, not just the field ranges. The translated control's two fresh runs
+are byte-identical as recorded in the preceding addendum. Its enc1 dispatch is
+rechecked by the contract script against the actual log, rejecting a native
+dispatch, `module_direct`, or duplicate translated dispatch. This is original
+hash-matched PTX translated by the recorded ZLUDA configuration on AMD, not an
+unmodified NVIDIA hardware oracle. No original intermediate trace is inferred
+from the interpreter or from matching terminal output hashes.
+
+### First divergent operation localized
+
+[M] `scripts/m_enc1_native_trace.py` instruments only a disposable copy of the
+pinned headers. The existing native replay probe downloads diagnostic globals.
+**Every instrumented output allocation must hash-identically to the
+uninstrumented conservative run**, or the trace is rejected. Natural-order
+coordinates and weight operands are checked against the verified probe and
+loader, rather than assumed from diagnostic buffer indices.
+
+For block `(4,1)` (all four windows, 4096 values per boundary):
+
+| Boundary | Conservative vs CPU differing FP16 bit patterns |
+|---|---:|
+| Input `x0` | 0 |
+| Norm1 sum / reciprocal | 0 / 0 (64 values each) |
+| Quantized norm1 `h1` | 0 |
+| Q projection, **first k32 step** | **51** |
+| V projection, **first k32 step** | **165** |
+| Complete Q / V projections | 109 / 176 |
+| Quantized attention output | 12 |
+
+All 64x64 dumped Q and V weight operands exactly match the CPU's mapped
+matrices. The first-step independent expected sum uses these E4M3 operands in
+FP64, then rounds once to FP16; this does not derive an oracle from AMD WMMA.
+For example, Q token 2/channel 40 has exact sum `-0.12738037109375`, RNE half
+`-0.12744140625` (`0xb014`), but conservative gives `-0.1273193359375`
+(`0xb013`). This is a rounding-boundary discrepancy, not an observed missing
+requantization or different input/weight mapping. It does **not** establish
+which lower-level WMMA/conversion behavior caused the discrepancy.
+
+[M] Control block `(2,2)` also has exact input, sum, reciprocal and h1; its
+first-step Q/V differ at 99/49 values and completed Q/V at 135/81 values, while
+quantized attention output is exact. Thus exact final control-window output
+does not imply exact intermediate arithmetic. These GPU boundaries are compared
+with the same CPU contract whose nine exposed boundaries previously matched
+Sette HLSL in these blocks; CPU/HLSL agreement is not original-GPU fidelity.
+
+The accepted traces are retained under
+`%TEMP%/opencode/enc1-contract-audited-trace-20261029/` and
+`enc1-contract-control-trace-20261029/`. A subsequent exploratory pre-conversion
+FP32 dump under `enc1-contract-trace-f32-20261029/` failed an internal consistency
+check (1856 values per projection did not round back to the adjacent half dump).
+That diagnostic is **not validated and is not evidence about WMMA precision**;
+raw files are preserved, and its added instrumentation was removed from the
+reproducible trace script. No arithmetic correction was based on it.
+
+### Classification, remaining limitations, and recovery
+
+**H3 is supported:** Sette differs from independently identified conservative
+d4r, beginning in the first Q/V k32 projection in the tested blocks. H1/H2/H4
+are not supported by these measurements. **H5 still applies to choosing a
+fully authoritative original numerical oracle:** conservative d4r also differs
+from translated PTX, and no NVIDIA hardware evidence or translated runtime
+intermediates establish which complete numerical contract is correct.
+
+The provenance audit of all fourteen historical launches is in EXP-003 and local
+`provenance.json`. Native routing is proven for all ten neural launches, but the
+historical fast/conservative build flags of the other four unique modules remain
+unrecorded; they are explicitly unknown, not inferred from pinned defaults.
+Only enc1 has the new controlled mode comparison. This audit limitation prevents
+calling the whole historical chain an authoritative conservative reference.
+
+No enc2/tube/decoder recovery or conservative-chain replacement was started:
+enc1 must first be validated against the independently translated execution.
+Next isolate the implicated k32 slice with a validated operand/result probe;
+then, if justified, derive an operator regression before changing CPU or HLSL.
+RMS normalization, Q/V and attention have partial boundary evidence here;
+output projection, GELU/MLP, residuals, final encoding and merge are downstream
+terminal comparisons, not newly validated original intermediates.
+
+[M] B4 reran successfully: final-frame identity remains **99.9369%**, maximum
+7 ULP, all existing criteria unchanged. **190 repository tests passed.** A fresh
+hardened translated capture at `enc1-translated-contract-20261029/` also passes
+the execution-mode checks and reproduces the prior translated input/output/merge
+bytes exactly (`fresh-translated-check.json` in the final experiment directory).
+The capture runner now removes inherited `D4R_*` / `ZLUDA_*` settings before
+applying its explicitly recorded configuration. The repository test suite is run as
+`python -m pytest tests -q`; an initial unscoped pytest invocation also collected
+reference command-line experiments and failed collection (nine argument errors),
+so it is not reported as a passing run. Execution-mode tests reject absent or
+contradictory dispatch evidence, wrong effective macros, missing load/dispatch,
+unbound capture completions and ambiguous instrumentation anchors.
+
+### Reproduction
+
+Use fresh, nonexistent local output directories. Commands assume the installed
+ROCm 7.2 and existing Windows replay probe; full compiler/replay commands are
+emitted in `report.json`, not hidden behind an accuracy environment variable.
+
+```powershell
+$T = "$env:LOCALAPPDATA\Temp\opencode"
+python scripts/m_enc1_contract.py --out "$T\enc1-contract-NEW"
+python scripts/m_enc1_native_trace.py --experiment "$T\enc1-contract-NEW" --out "$T\enc1-trace-NEW" --block 4,1
+python scripts/m_enc1_native_trace.py --experiment "$T\enc1-contract-NEW" --out "$T\enc1-control-NEW" --block 2,2
+python scripts/m_capture_provenance.py --log "$T\m-capture-run\probe-1080b.log" --capture "$T\m-capture-run\capture-1080b" --json "$T\enc1-contract-NEW\provenance.json"
+python scripts/m_capture_translated_enc1.py --out "$T\enc1-translated-NEW"
+python -m pytest tests -q
+python scripts/m_conformance.py --json "$T\enc1-contract-NEW\b4.json"
+```
+
+All binaries, generated diagnostic headers, PTX, weights, inputs and outputs stay
+local/untracked. The pinned submodule and production shaders remain unchanged.
+
+## Addendum: one first-K32 Q operation, runtime operands and arithmetic (2026-10-29)
+
+**Selected discrepancy characterized; no numerical correction justified. B5
+remains IN PROGRESS / FAIL at its existing chain gate.** This addendum supersedes
+the earlier lack of translated runtime intermediates **for the two selected Q
+operations only**. It does not resolve the whole enc1 discrepancy.
+
+### Selection and direct operand proof
+
+[M] The mismatching window is block `(4,1)`, window 0, token 2, natural Q channel
+40, field coordinate `(32,6)`. It has **2** final output-code differences against
+the conservative capture. The exact control is block `(2,2)`, **window 2**, token
+34, channel 40, field `(16,18)`, with **0** final output differences. Window 0 of
+the control block is *not* exact (32 differences): an initial probe incorrectly
+used token 2 there, failed the explicit selection check, and was not accepted as
+the final control. The final script verifies both window classifications.
+
+[R/M] `scripts/m_k32_ptx_trace.py` replays the **existing** translated enc1 input
+allocations, not a newly generated frame. It adds diagnostic stores following
+the original first Q K32 instructions in these windows; their calculations and
+register operands are retained. The logged dispatch is `backend=translated`,
+`grid=61,35,1 block=32,1,2`, with no native dispatch or `module_direct`.
+**Both complete ordinary output allocations hash-identically to the existing
+uninstrumented translated capture.** Output invariance does not prove identical
+register allocation or scheduling; it is the required experimental control,
+not an assertion that instrumentation leaves every compiler decision unchanged.
+
+Original PTX: local `module-246ed4dd4573ee6d-0000.ptx`, SHA-256
+`f51bdc9e7b0e136865cc90ebdf1702614877a6cef65c387127038ac3e42e5a04`,
+PTX 8.7 / `sm_89`. Both sites use
+`mma.sync.aligned.m16n8k32.row.col.f16.e4m3.e4m3.f16`:
+
+| Window | Original line | A registers | B registers | C registers | D registers |
+|---|---:|---|---|---|---|
+| Mismatch | 2365 | `%r9747..%r9750` | `%r396,%r397` | `%r1975,%r1975` | `%r404,%r405` |
+| Exact control | 2421 | `%r9763..%r9766` | `%r396,%r397` | `%r1975,%r1975` | `%r484,%r485` |
+
+[M] For **each** selected operation, decoding the actual runtime fragment words
+proves that all 32 activation E4M3 codes, all 32 weight E4M3 codes, and the zero
+FP16 accumulator equal the verified conservative diagnostic operands. No operand
+or normalization mismatch was found. The original PTX output is read from the
+instruction's raw FP16 D registers, **not inferred from final FP8 codes**.
+
+Both operations use PTX wave 1 (head 1), MMA coordinate `(row=2,col=4)`, D lane
+10 / low half of its first D word. The natural weight column is 40. In d4r's
+pair-order WMMA representation, this is column-lane 4, accumulator element 1;
+the waves are 1 for the mismatch and 3 for the control (which carries window 2).
+The runtime input/weight proof, all 32 raw E4M3 and FP16 operand patterns,
+decoded values, accumulator and coordinate metadata are local in
+`%TEMP%/opencode/k32-contract-evidence-20261029/report.json`. Captured operands are
+deliberately not copied into tracked fixtures.
+
+### Independent operator probe and raw results
+
+[M] `scripts/m_k32_probe.py` runs replicated matrix tiles, so every physical
+row/column computes the **same** selected dot product. It checks every lane and
+result element, compares with the original native boundary, verifies every
+dumped FP32 value rounds to the adjacent FP16 result, and rejects unequal tiles.
+A separate result-only build omitting FP32 diagnostic stores gives identical
+ordinary arithmetic outputs. The HIP module is an arithmetic diagnostic, **not
+a new Sette backend**. CPU, D3D12/HLSL, and translated PTX receive losslessly
+repacked identical operands. The mathematical oracle sums integer E4M3 products
+on the `2^-18` lattice, independently of BLAS and GPU reduction behavior.
+
+The d4r K16 slot orders, from pinned `swin_common.h:343-350`, are:
+
+```text
+first:   0 1 2 3 16 17 18 19 4 5 6 7 20 21 22 23
+second:  8 9 10 11 24 25 26 27 12 13 14 15 28 29 30 31
+```
+
+Pinned conservative `k32` converts C to FP32, executes two chained
+FP16-operand / FP32-accumulator WMMAs, then converts once to FP16. There is no
+intermediate FP16 rounding between its two K16s. Sette's production CPU helper
+and the diagnostic using the production HLSL `R16D` helper both agree with the
+independent integer oracle for all tested cases, including two successive K32s.
+
+| Selected mismatch, C = `0x0000` | Exact mathematical value / bits | Native WMMA probe value / bits |
+|---|---|---|
+| First K16 + C | `-0.03833770751953125`, FP32 `0xbd1d0800` | `-0.038337692618370056`, FP32 `0xbd1d07fc` |
+| Second K16 product sum alone | `-0.08904266357421875` | Not a separate native accumulator operation |
+| Chained K32 before FP16 conversion | `-0.12738037109375`, FP32 `0xbe027000` | `-0.1273803412914276`, FP32 `0xbe026ffe` |
+| Final FP16 | **`0xb014`** | **`0xb013`** |
+
+Thus the first observed incompatible arithmetic is already the **first K16
+WMMA accumulation**, before the final FP16 conversion. The two-FP32-ULP K32
+deviation moves an exact FP16 midpoint to one side. The final native conversion
+correctly rounds its own FP32 input; an arbitrary FP16 ULP fix would target the
+wrong operation. These raw FP32 observations are from the validated replicated
+microprobe, **not claimed as a successful in-place dump of the original native
+kernel's hidden registers**. Its selected final result matches that kernel.
+
+| Execution | Mismatch first K32 FP16 | Exact-window control FP16 |
+|---|---:|---:|
+| Integer mathematical oracle | `b014` | `b170` |
+| Sette production CPU helper | `b014` | `b170` |
+| Sette HLSL helper diagnostic | `b014` | `b170` |
+| Conservative d4r boundary and isolated native WMMA | `b013` | `b170` |
+| Original enc1 translated runtime D register | **`b014`** | **`b170`** |
+| Isolated original PTX instruction through the same runtime | `b014` | `b170` |
+
+[M] A K-grouping control using contiguous `0..15`, then `16..31`, returns
+`b014` for the mismatch, but is **not** a proposed correction. Uniform `2^-8`
+operand scaling / `2^-16` C scaling / inverse result scaling with the original
+d4r slot order still returns `b013`; scaling alone does not explain this case.
+The probe also retains a fast FP32-through-chain control: for the contiguous
+grouping the selected second operation is `b414` with per-K32 FP16 rounding,
+but `b413` when the first FP32 result is retained. This is not a replacement
+for the separately identified full fast d4r kernel, whose prior negative-control
+measurements remain unchanged.
+
+### PTX contract and limits of equivalence
+
+[D] NVIDIA's [PTX ISA, `mma` precision and rounding](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-mma)
+(section 9.7.16.5.14, consulted 2026-10-29) states for E4M3/E5M2 operations that
+intermediate accumulation uses at least single precision, but **accumulation
+order, rounding, and handling of subnormal inputs are unspecified**. It does
+not require exact mathematical summation followed by one RNE half conversion.
+The locally retained page is `%TEMP%/opencode/ptx-isa-20261029.html`, SHA-256
+`a5dd908b2c7dbdb9c6815424b3a355d3ef18a09b7851594367559a8a174b2c9e`.
+The Context7 lookup returned CUTLASS rather than this instruction specification;
+the precision claim above is from the actual NVIDIA PTX specification.
+
+[M] Thirteen microprobe cases cover captured operands, zero/nonzero C, signed
+products, cancellation, E4M3 subnormals, maximum finite operands, positive and
+negative FP16 midpoints, and successive K32s. Native, HLSL and translated
+operator outputs are deterministic across two runs; HLSL also uses two sentinel
+seeds. Maximum finite products overflow to half infinity in this non-saturating
+instruction; this is not FP8 encoding's satfinite policy.
+
+The nonproprietary negative midpoint is `-(1*1 + (1/32)*(1/64))`, with all other
+products zero and C zero. Its exact FP32 result is `0xbf801000`, exact RNE half
+`0xbc00`; native WMMA gives FP32 `0xbf801001` and half `0xbc01`.
+The translated instruction also returns `bc01`, while CPU/HLSL return `bc00`.
+Changing the unused activation zeros from negative zero to positive zero does
+not change this outcome. Since the only nonzero products and their sum are
+exactly representable in FP32, this case cannot be explained solely by choosing
+a different tree of **correctly rounded IEEE FP32 additions**. It exposes
+non-exact WMMA internal arithmetic/rounding, not a prescribed exact-dot contract.
+The unspecified PTX rounding permits a difference from mathematical RNE; this
+experiment is not an exhaustive PTX-conformance certification.
+
+[R] Actual native and cache-extracted translated code objects are disassembled
+in `native-isa.txt` and `translated-isa.txt`. The native probe's initial K32
+uses `v_wmma_f32_16x16x16_f16` at `0x1ae8` and `0x1b08`; the translated
+two-instruction synthetic kernel contains four such WMMAs (two per PTX MMA).
+Scaling/conversion instructions are retained as well. ROCm 7.2's disassembler
+marks some translated conversion-register decodes invalid, so this is bounded
+instruction evidence, not a complete verified ISA reconstruction. Internal
+WMMA reduction/rounding and the original translated instruction's hidden FP32
+partials are still unobserved; they cannot be deduced uniquely from its D bits.
+
+### Provenance, failures, and verdict
+
+The final local artifacts are:
+
+- `enc1-k32-original-final-20261029/`: instrumented original PTX, raw runtime
+  fragments, output-allocation hashes, explicit dispatch log and API calls.
+- `k32-contract-evidence-20261029/`: raw operand/result reports, native/HLSL/PTX
+  microprobes, repeated executions, result-only control, actual code objects,
+  compiler commands, runtime identity and disassemblies.
+- `k32-verified-20261029/b4-b5.json`: fresh full regression-gate measurements.
+
+| Executed artifact | SHA-256 |
+|---|---|
+| Native arithmetic microprobe | `5912a8a9aa890bf4ace4857fd1b4322aadc37dda00d12cc59d67cf4a085b2d27` |
+| HLSL diagnostic | `a4b70d6dfeed595ee0fe1eac31fb0d71fb3652014c458400a7451806f3c0f0d9` |
+| Translated operator code object (actual cache bytes) | `8890c624d1e76675e6daff902be921e42089329c7004e8c586d7a8429732eb62` |
+| Actual loaded `nvcuda.dll` | `f2880a56b152c3b906a72b5c2d0dd21e4b2d00b43715a2f992e03605d5ddd98c` |
+
+The runtime cache identifies gfx1101 and ZLUDA base
+`ee2f25a180099fa42f36b2346732e1f2470a03ad` with additional delta identifiers
+and the recorded WMMA settings. The installed `build-info.json` lists an older,
+different DLL hash (`71b45190...`); it is not used as proof of the executed
+binary. Pinned d4r source describes its conservative algorithm and intended
+translation, but does not by itself establish this locally modified translator's
+complete behavior. All settings and actual binary/cache hashes are retained.
+
+Three new in-place native FP32-dump attempts (`enc1-k32-raw-*`) preserved ordinary
+outputs but **failed internal FP32-to-adjacent-FP16 consistency** (192/256 results
+in the first attempt). Unrolling/literal-index stores did not validate them.
+They remain rejected diagnostics, not evidence of a compiler bug or WMMA
+precision; their generated sources and dumps remain local. The standalone
+probe avoids that failure with replicated tiles and independently checks every
+result. The first original-PTX replay's PowerShell stderr redirection reported
+a shell error despite its passing worker report; the final launcher captures
+stdout/stderr and verifies process status and dispatch explicitly.
+
+**Verdict:** A (Sette wrong) is **not supported for this selected operation**:
+Sette matches the original translated runtime result. B is supported only in
+the narrow sense that d4r's conservative "exact" label is **not mathematical
+exact-sum/RNE behavior**; this does not establish a PTX-spec violation. C
+(distinct permitted rounding) is supported by the independent synthetic probe.
+D is excluded for the selected operands/C. E (compiler bug) is not established;
+different lowerings exist, but no faulty lowering has been proven. F remains
+for the full original-hardware contract and a bit-exact model of internal WMMA
+rounding. No NVIDIA hardware claim is made.
+
+**Correction decision:** retain the existing CPU and HLSL arithmetic. Neither
+copying native WMMA's `b013`, nor switching all K groupings, follows from the
+original PTX instruction's contract. Only the misleading shader comment equating
+the PTX accumulator declaration with an exact FP32 contract was corrected.
+No fitted constants, ULP nudges, quantization changes or performance work were
+introduced. The remaining smallest question is the precise internal WMMA
+rounding model and its relationship to the translated runtime on actual
+divergent operands—not another layout/normalization investigation.
+
+[M] Fresh independent replays of all ten neural layers and the full chain
+reproduce the prior measurements. With **no arithmetic change**, before/after
+enc1 is **96.924307% output / 91.287531% merge** against conservative, and
+chained dec1 is **21.3270%**, deterministic. The original instrumented translated
+replay is byte-identical, so the prior enc1 comparison against translated remains
+**96.418337% / 89.837910%**; no improved full-network fidelity is claimed.
+`m_conformance.py --network` returns the expected failure at the unchanged **99%**
+chain floor. B4 remains green at **99.9369%**, maximum 7 ULP. **204 tests pass**,
+including all 190 existing tests and 14 new nonproprietary regressions.
+
+### Reproduction (new local output directories)
+
+```powershell
+$T = "$env:LOCALAPPDATA\Temp\opencode"
+python scripts/m_k32_ptx_trace.py --ptx "$T\enc1-translated-contract-20261029\ptx\module-246ed4dd4573ee6d-0000.ptx" --capture "$T\enc1-translated-contract-20261029\capture\replay-000001-rrlite_enc1_4x4" --out "$T\enc1-k32-original-NEW"
+python scripts/m_k32_probe.py --out "$T\k32-NEW" --experiment "$T\enc1-contract-final-20261029" --trace "$T\enc1-contract-audited-trace-20261029" --control "$T\enc1-contract-control-trace-20261029" --original-trace "$T\enc1-k32-original-NEW"
+python -m pytest tests -q
+python scripts/m_conformance.py --network --json "$T\k32-NEW\b4-b5.json"
+```
+
+The last command is expected to fail B5, not B4. No proprietary binaries,
+weights, PTX dumps or captured tensors are added to Git; the pinned submodule
+remains unchanged. No downstream matrix investigation or B6/B7 work was started.

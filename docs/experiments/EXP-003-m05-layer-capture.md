@@ -94,3 +94,69 @@ the captured GPU result; it does not contradict the exact replay.
 - `scripts/replay_m_layers.py`
 - Captures, weights, modules, and NVIDIA DLLs remain local temporary artifacts
   and are not committed.
+
+## Addendum (2026-10-29): replay independence limitation
+
+The enc1 investigation in [EXP-019's addendum](EXP-019-m05-native-network.md)
+finds that the later canonical `capture-1080b` log explicitly selects d4r-native
+replacement kernels and skips translated JIT. Consequently native replay
+identity alone cannot establish independent NVIDIA/PTX fidelity. The earlier
+byte comparisons remain historical observations; their attribution to original
+NVIDIA execution requires backend evidence, not merely an `rrlite_*` kernel
+name or the recorded original launch dimensions.
+
+## Addendum (2026-10-29): canonical launch audit and numerical-mode control
+
+[M] The canonical 1920x1080 `capture-1080b` is a **mixed-backend** capture,
+not fourteen independent original-network executions. The UTF-16
+`%TEMP%/opencode/m-capture-run/probe-1080b.log` has SHA-256
+`82a811f20e2c00c15ea3e3a793ef4729e8df17d1b38eaf25a7442e1429a9288c`.
+Its launch records, bound to each manifest and capture completion by
+`scripts/m_capture_provenance.py`, establish:
+
+| Execution order | Captured kernel (tube occurrence) | Actual backend | Log line | Numerical-mode evidence |
+|---:|---|---|---:|---|
+| 1 | `rrlite_enc0_4x4_mvhi_ldr_folded` | translated PTX | 635 | ZLUDA lowering, not NVIDIA hardware |
+| 2 | `rrlite_enc1_4x4` | d4r native | 640 | Conservative-equivalent output in the new controlled experiment; historical build flags not recorded |
+| 3 | `rrlite_enc2_4x4` | d4r native | 645 | Fast/conservative mode not established by historical metadata |
+| 4 | `rrlite_enc3_tube_4x4` #1 | d4r native | 650 | Same limitation |
+| 5 | `rrlite_enc3_tube_4x4` #2 | d4r native | 655 | Same limitation |
+| 6 | `rrlite_enc3_tube_4x4` #3 | d4r native | 660 | Same limitation |
+| 7 | `rrlite_enc3_tube_4x4` #4 | d4r native | 665 | Same limitation |
+| 8 | `rrlite_enc3_tube_4x4` #5 | d4r native | 670 | Same limitation |
+| 9 | `rrlite_enc3_tube_4x4` #6 | d4r native | 675 | Same limitation |
+| 10 | `rrlite_dec2_4x4` | d4r native | 680 | Same limitation |
+| 11 | `rrlite_dec1_4x4` | d4r native | 685 | Same limitation |
+| 12 | `rrlite_dec0_4x4_folded` | translated PTX | 690 | ZLUDA lowering, not NVIDIA hardware |
+| 13 | `rrlite_post_3_1_mvhi_ldr_folded` | translated PTX | 695 | ZLUDA lowering, not NVIDIA hardware |
+| 14 | `rrlite_downsample_kernel_static_ldr` | translated PTX | 700 | ZLUDA lowering, not NVIDIA hardware |
+
+[M] The five unique neural modules log `module_direct ... translated_jit=skipped`
+at lines 513, 520, 527, 534 and 541. Their selected module paths are under
+`%TEMP%/opencode/d4r-runtime/d4r/native/gfx1101/`. The audit report records those
+paths and **audit-time** binary hashes. These are not retrospective proof that
+the files were unchanged since capture. Original recorded compiler flags are
+unavailable; neither the directory name nor a current source default establishes
+the installed binary's arithmetic mode.
+
+[S] At pinned d4r `05e19d402781083118d106f2a21d0cf2bc43f744`, all five
+`kernels/m/rrlite_*.hip` entry points define `SWIN_NO_Q8` and `SWIN_F32ACC`.
+However, `swin_common.h:40-57` overrides both when `D4R_ACCURACY` selects
+`SWIN_EXACT`. `kernels/build.sh:79-107` requires a separate accuracy output and
+passes `-DD4R_ACCURACY`; `docs/native-kernels.md` describes native substitution,
+and patches `0004` and `0014` implement replacement/lazy translation. These are
+source facts, **not evidence that this capture selected the fast build**.
+
+[M] In the new experiment, separately compiled pinned fast and conservative enc1
+binaries replay identical captured bytes. Conservative output **and merge are
+100% identical to the canonical capture**; fast is only 30.537265% / 27.768650%.
+Therefore the hypothesis that enc1's old 96.924% Sette agreement is explained by
+a fast-reference/conservative-Sette mismatch is not supported. This does not
+certify the historical binaries' flags or all other layers' contracts.
+
+Full metrics, binary identities, first-operation localization, build/replay
+commands, and limitations are in [EXP-019's contract-validation addendum](EXP-019-m05-native-network.md#addendum-oracle-provenance-and-controlled-contract-validation-2026-10-29).
+The original replay measurements above remain valid as self-replay measurements;
+their wording as captured **NVIDIA layer fidelity** is superseded. The separate
+translated enc1 control is GPU execution through ZLUDA on AMD; the PTX interpreter
+remains supplementary semantic evidence only.
