@@ -383,7 +383,23 @@ Establish a deterministic reference execution path.
   including four new merge-contract tests. A B6 full-frame run would inherit the
   unvalidated chained dec1 (21.5728% against the translated chain) and needs an
   explicit decision rather than being started as a continuation.
-- [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
+- [ ] B6 (C21): Full-frame oracle - **EXPLORATORY, no criteria yet.** The complete
+  native pipeline (`enc0` -> ten native layers -> `dec0` -> `post` -> `downsample`)
+  now produces a 1920x1080 frame on gfx1101 with no captured tensor substituted
+  between neural stages
+  ([EXP-020](experiments/EXP-020-m05-native-frame.md)). Measured against the canonical
+  capture: 47.05 dB PSNR (peak 1.0), 0.99794 SSIM, mean absolute error 0.001086,
+  maximum 0.178, zero NaN/Inf, zero saturation, and two complete runs are
+  byte-identical. Feeding the image stages the captured `dec1` instead gives 46.73 dB
+  and the translated-PTX chain gives 47.08 dB, so the chained neural difference
+  (46.59 dB versus the captured-dec1 path) is the same order as the image-stage
+  difference and neither dominates. No region collapses and the error is spread with a
+  mild border bias, so the existing differences do not indicate a substantial
+  reconstruction defect. This is **not** a validated oracle: B5 is still
+  IN PROGRESS / FAIL, B6 has no acceptance criteria, the frame is single static frame
+  with captured history/motion/colour inputs, and it must not be reported as an FP16
+  oracle result. Viewable reference/reconstruction/difference PNGs are exported
+  locally; nothing proprietary is tracked.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 
 ### Validation Gate
@@ -402,7 +418,10 @@ that executes a captured launch natively ([EXP-012](experiments/EXP-012-m05-nati
 What remains is the ten-layer network under the translated-PTX contract (B5: the
 rescoped gate passes eleven of twelve declared fields and the chained criterion, and
 fails only enc1 merge at 89.8379% against a 90% floor,
-[EXP-019](experiments/EXP-019-m05-native-network.md)), the full frame (B6) and
+[EXP-019](experiments/EXP-019-m05-native-network.md)), the full frame (B6: the pipeline
+now produces a complete 1920x1080 frame at 47.05 dB / 0.99794 SSIM, but as an
+EXPLORATORY result without criteria,
+[EXP-020](experiments/EXP-020-m05-native-frame.md)) and
 temporal validation (B7, now possible: four temporal chains hold over 24 frame pairs). `dec0`'s four surfaces are reproduced with a measured, attributed residual -
 gates 99.9991%, mix 99.9348%, feature 99.9787%, covariance 99.9883% of f16 values identical
 ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)) - and its operand mapping is now derived
