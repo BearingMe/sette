@@ -47,7 +47,9 @@ set(SHADERS
 # its own target so the FP16 and reconstruction shaders keep their SM 6.2
 # code generation (and their measured outputs) unchanged.
 set(SHADERS64
-    "gemm_int8_cs.hlsl|main|gemm_int8_cs.cso")
+    "gemm_int8_cs.hlsl|main|gemm_int8_cs.cso"
+    "swin_q8_quant_cs.hlsl|Quantize|swin_q8_quant.cso"
+    "swin_q8_matmul_cs.hlsl|Matmul|swin_q8_matmul.cso")
 
 # The Swin block needs native 16-bit types: the contract rounds f64 sums and
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
@@ -105,7 +107,7 @@ foreach(entry IN LISTS SHADERS64)
         OUTPUT "${artifact}"
         COMMAND "${DXC_EXECUTABLE}" -T cs_6_4 -E "${entrypoint}" -O3
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
-        DEPENDS "${input}"
+        DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/swin_q8_common.hlsli"
         COMMENT "dxc ${source}:${entrypoint} -> ${output} (cs_6_4)")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()
