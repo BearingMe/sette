@@ -1118,3 +1118,112 @@ Local experiment directories for this addendum: `enc1-translated-20261029`,
 `chain-translated-*-20261029` (chained boundaries in `chained-boundaries.json`),
 `enc1-contract-translated-20261029`. No proprietary payload, PTX, code object, weight
 or capture is added to Git, and the pinned d4r submodule is unchanged.
+
+## Addendum: B5 rescoped to a translated-PTX contract (authorized 2026-10-29)
+
+**Acceptance criteria changed; no measured value, fixture or arithmetic changed.
+The rescoped gate was run and FAILS on exactly one field (enc1.merge). B5 remains
+IN PROGRESS / FAIL.**
+
+### 1. Decision
+
+The project owner authorized a controlled rescope of B5 instead of continued pursuit
+of byte identity with a single native trajectory. The preceding addendum established
+why: the two original implementations disagree with each other at layer scope
+(1.5-5.4% of codes) and at chain scope (78.3% of the dec1 field), so a 99% chained
+identity floor cannot be satisfied by the original PTX, by d4r's native replacement,
+or by any reconstruction. The floor measured the sensitivity of ten e4m3
+requantizations, not fidelity.
+
+What is unchanged: B4 and its criteria, every captured fixture, the legacy
+`m_layer_suite.py` chain floor (99%), the fast/conservative separation, the pinned
+d4r source, and all production arithmetic. What changed: B5's acceptance criterion and
+the way `m_conformance.py` reports the two comparisons.
+
+### 2. Criteria (declared before the run)
+
+`m_conformance.py` now gates B5 on the translated-PTX contract (`B5` in the script).
+Every bound is a constant, and each is anchored on the reference pair's own measured
+behaviour rather than on Sette's.
+
+Mode A, every declared layer field (`output`, plus `merge` for enc1/enc2):
+
+| Criterion | Bound | Justification |
+|---|---|---|
+| exact e4m3 codes | >= 90% | Highest round decade below the reference pair's own worst field (conservative d4r vs translated: 92.2784% at enc2 merge, 94.59% at the worst output). |
+| relative RMS | <= 0.02 | Above the worst measured value of either implementation (0.01682, conservative tube#6). |
+| maximum decoded deviation | <= 1.5 | Above both implementations' worst (1.06, dec1). |
+| absolute signed mean | <= 1e-3 | Above both implementations' worst (6.4e-4). |
+| non-finite / saturation | exact | A non-finite pair or a saturation-count mismatch is not a rounding difference. |
+| determinism | required | fast, conservative and Sette, across repeats. |
+
+Mode B, chained dec1 against the fully translated chain, relative to the reference
+pair's own chained result:
+
+| Criterion | Bound | Justification |
+|---|---|---|
+| exact codes | reference - 2 points | The reference pair's own chained dec1 agreement is 21.7096%; two points is one fortieth of the 78.3% they disagree by, and much smaller than any layer-scope gap. |
+| relative RMS | reference + 0.02 | One code-step scale, not an absolute floor fitted to a chaotic quantity. |
+| maximum decoded deviation | reference + 1.0 | Same reasoning. |
+| provenance | exact | Every chained boundary must record a translated dispatch and no native dispatch, and the reference must have been measured with the current Sette executable and shader hashes. |
+
+The legacy native-replacement comparison still runs, is still printed, and is filed
+under `report['legacy']`; it is now **diagnostic and does not veto**. A missing,
+incomplete or stale translated reference fails B5 instead of being skipped.
+
+### 3. What the gate found
+
+[M] `m_conformance.py --network --translated-network <suite>` on the current build:
+
+- **FAIL** `B5 enc1.merge: 89.8379% identical, below 90.0%`
+- **FAIL** `B5 enc1.merge: relative RMS 0.02111 exceeds 0.02`
+
+Everything else passes: all eleven other fields (94.6417-98.7963% exact, RMS
+0.00410-0.01566, max 0.25-1.06, |bias| <= 6.1e-4), all determinism, all saturation and
+non-finite checks, and the chained criterion (Sette 21.5728% versus the reference
+pair's 21.7096%, i.e. 0.14 points better; RMS 0.12328 versus 0.12270; maximum equal at
+2.5). The legacy comparison is recorded as failing (21.3270%) and does not veto.
+
+[M] enc1's merge residual is a rounding-boundary residual, not a mapping error:
+318,423 of 3,134,440 codes differ, spread evenly over the three 32-channel planes
+(88.9-90.7% exact), dominated by adjacent-code pairs (`58->57`, `184->185`, `187->188`),
+with an even sign split (+153,913 / -164,510 decoded), maximum 0.5 and bias +3.0e-4.
+Sette's merge agreement is 4.55 points below conservative d4r's on the same field,
+which is what the declared floor detects.
+
+### 4. Interpretation and the remaining item
+
+[M] The rescoped gate is discriminating rather than decorative: with the old chained
+floor every implementation failed for the same noise reason, and the failure carried
+no information about where Sette differs. The new gate fails on one named field with a
+quantified margin and passes the other eleven plus the chain criterion.
+
+No bound was loosened after the measurement, and B5 is not declared complete. The
+smallest source-grounded question is now enc1's patch-merge output: localize its first
+divergent operation with the same instrumented original-PTX replay used for the K32
+investigation, and classify it as reconstruction defect, ZLUDA/AMD lowering difference
+or permitted rounding. Only if that classification shows the floor is not applicable
+to the merge field would a merge-specific bound be justified, and it would have to be
+declared in a fresh experiment before being measured.
+
+### 5. Reproduction
+
+```powershell
+$T = "$env:LOCALAPPDATA\Temp\opencode"
+python scripts/m_translated_layer_suite.py --out "$T\translated-layers-NEW" `
+  --enc1 "$T\enc1-translated-20261029-b" --enc2 "$T\enc2-translated-20261029" `
+  --tube "$T\tube-translated-20261029-b" --dec2 "$T\dec2-translated-20261029" `
+  --dec1 "$T\dec1-translated-20261029" `
+  --chain-enc1 "$T\chain-translated-enc1-20261029" --chain-enc2 "$T\chain-translated-enc2-20261029" `
+  --chain-tube "$T\chain-translated-tube-20261029" --chain-dec2 "$T\chain-translated-dec2-20261029" `
+  --chain-dec1 "$T\chain-translated-20261029"
+python scripts/m_conformance.py --network --translated-network "$T\translated-layers-NEW" --json "$T\b4-b5-NEW.json"
+python -m pytest tests -q
+```
+
+The suite accepts `--resume` to reuse contracts already written in `--out`, and
+`SETTE_TRANSLATED` supplies `--translated-network` without the flag. Local evidence for
+this addendum: `translated-layers-20261029-c` (`summary.json`, `b4-b5.json`) and
+`enc1-translated-20261029-b` (fresh enc1 capture whose input, output and merge fields
+equal the earlier run byte for byte). Regression tests for the criteria, the
+fail-closed paths and the legacy non-veto behaviour are in `tests/test_b5_gate.py`.

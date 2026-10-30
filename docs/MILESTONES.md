@@ -346,6 +346,24 @@ Establish a deterministic reference execution path.
   fidelity measurements are reported separately and any gate replacement needs
   an explicit, separately validated decision. B4 stays green at 99.9369%,
   208 tests pass, and 21.3270% remains the failing legacy chain result.
+  **B5 rescope (authorized 2026-10-29):** acceptance moved from byte identity with
+  one native trajectory to the translated-PTX contract, declared before the run
+  and encoded in `m_conformance.py` (`B5`): per layer `output`/`merge` >= 90%
+  exact e4m3 codes, relative RMS <= 0.02, maximum decoded deviation <= 1.5,
+  |signed mean| <= 1e-3, exact saturation and zero non-finite pairs, with all
+  three implementations deterministic; and chained dec1 within 2 points of the
+  reference pair's own chained agreement (21.7096%), RMS within +0.02 and maximum
+  within +1.0 of it. The reference must be measured with the current Sette
+  binary and shaders, and a missing or stale reference fails instead of being
+  skipped. The legacy native-replacement comparison still runs and is reported,
+  but it is diagnostic and no longer vetoes; its 99% floor is unchanged. The
+  rescoped gate was executed and **fails on exactly one field**: enc1 merge,
+  89.8379% exact and RMS 0.02111 against 90% and 0.02. The other eleven fields
+  (94.6417-98.7963%) and the chained criterion (21.5728% versus 21.7096%) pass.
+  The residual is adjacent-code rounding spread evenly over the merge's three
+  channel planes, not a mapping error. B5 therefore stays IN PROGRESS / FAIL,
+  with enc1 patch merge as the single open item; no bound was loosened and the
+  merge field was not exempted. 222 tests pass, including 14 new gate tests.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 
@@ -362,8 +380,9 @@ with the captured images. The Windows-native reconstruction is in progress: one 
 reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md))
 and `downsample` now reproduces its captured surface byte for byte, with the fixture path
 that executes a captured launch natively ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
-What remains is a byte-faithful ten-layer chain (B5: it runs natively and
-deterministically, but the chained `dec1` field is 21.3%, not the required 99%,
+What remains is the ten-layer network under the translated-PTX contract (B5: the
+rescoped gate passes eleven of twelve declared fields and the chained criterion, and
+fails only enc1 merge at 89.8379% against a 90% floor,
 [EXP-019](experiments/EXP-019-m05-native-network.md)), the full frame (B6) and
 temporal validation (B7, now possible: four temporal chains hold over 24 frame pairs). `dec0`'s four surfaces are reproduced with a measured, attributed residual -
 gates 99.9991%, mix 99.9348%, feature 99.9787%, covariance 99.9883% of f16 values identical
