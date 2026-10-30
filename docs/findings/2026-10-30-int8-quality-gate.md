@@ -66,3 +66,33 @@ surrounding image stages impose a 46.73 dB ceiling for this frame.
 * [EXP-035](../experiments/EXP-035-stage-error-attribution.md) — boundary ranking.
 * [EXP-036](../experiments/EXP-036-precision-experiments.md) — controlled variants.
 * `m11-quality-20261030.json`, `m11-precision-20261030/precision.json`.
+
+## Addendum — asymmetric activation encoding (2026-10-30, EXP-041)
+
+**Outcome:** the 45 dB gate still **FAILS**, but full INT8 quality improves from
+**44.1393 dB to 44.4026 dB** (+0.263) with **76/76 operators and
+34,518,597,632 MACs unchanged**, at ~2.9% higher GPU time. The change is
+asymmetric per-row encoding (true min/max, offset) for the two strongly
+one-sided operands: post-GELU → MLP-down and softmax P → PV. The offset is
+applied in the consumer epilogue; the signed `dot4` reduction is unchanged.
+
+* [M] Operator output error: MLP-down 3.19→1.99% (enc1), 1.75→1.23% (dec1);
+  PV 0.541→0.258% (enc1), 0.657→0.316% (dec1).
+* [M] Bit-exact CPU/GPU validation on enc1 and dec1; signed `dot4` verified by
+  RGA; 0 FP16 matrix instructions.
+* [M] Across nine content variants the mean improves 43.98→44.24 dB and the
+  worst case 42.12→43.13 dB; two variants regress by 0.21/0.25 dB.
+* [M] Selective FP16 was re-measured on top: `enc0` FP16 + asym reaches
+  **44.7652 dB** (75/76 operators, 96.9% MACs, +9.7% time) and improves all nine
+  frames; attention FP16 + asym reaches 44.8119 dB on the canonical frame but is
+  worse across content (mean 44.34, min 42.93) and 36% slower, so it is rejected.
+* [M] Per-K-block weight scaling was measured and rejected: representation error
+  falls 34× but the GEMM output only 11.6%, for a new accumulation contract.
+
+**Recommendation:** adopt `full INT8 + asym` as the quality-first full-INT8
+configuration and `enc0` FP16 + asym as the best measured quality/cost mixed
+configuration. Do not lower the 45 dB gate; the remaining 0.24–0.60 dB needs a
+different representation (more bits, residual correction, or reconstruction
+changes outside the 76 operators), not another scale tweak.
+
+See [EXP-041](../experiments/EXP-041-quality-recovery.md).

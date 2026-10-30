@@ -36,8 +36,8 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M09 | INT8 Kernel Reconstruction | COMPLETE | PASS |
 | M10 | Complete Network Execution | COMPLETE (bounded C05) | PASS (bounded C05) |
 | M11 | Differential Error Mapping | COMPLETE | PASS |
-| M12 | Weight Quantization Refinement | NOT STARTED | PENDING |
-| M13 | Activation and Temporal Refinement | NOT STARTED | PENDING |
+| M12 | Weight Quantization Refinement | COMPLETE | PASS |
+| M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
 | M14 | Performance Baseline | IN PROGRESS | PASS (bounded) |
 | M15 | RDNA 3 Optimization | IN PROGRESS | PASS (bounded) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
@@ -57,7 +57,12 @@ no `reset = 0` branch or labelled non-reset capture exists
 [EXP-031](experiments/EXP-031-temporal-oracle.md),
 [EXP-032](experiments/EXP-032-temporal-error.md),
 [EXP-033](experiments/EXP-033-temporal-checkpoints.md)). Quality and performance
-work continues in M11-M15; the unchanged 45 dB gate still FAILS for INT8.
+work continues in M11-M15. M12/M13 closed the static quantization investigation:
+per-K-block weight scaling was measured and rejected, while asymmetric activation
+encoding for post-GELU and softmax probabilities is accepted as an opt-in
+configuration and raises the canonical frame to 44.4026 dB at **76/76 INT8
+operators** ([EXP-041](experiments/EXP-041-quality-recovery.md)). The unchanged
+45 dB gate still FAILS for every measured configuration.
 
 ---
 
@@ -927,23 +932,45 @@ clipping changes is not supported by the evidence; the gate stays **FAIL**.
 
 ## M12 — Weight Quantization Refinement
 
+**Status:** COMPLETE / PASS for the investigation. The accepted per-output-column
+weight encoding is retained; per-32-element K-block scaling was measured and
+**rejected** because its output benefit is modest relative to the new
+accumulation contract. Selective higher precision was evaluated at the operator
+and network level, not as a weight-only variant. See
+[EXP-041](experiments/EXP-041-quality-recovery.md) and
+[EXP-036](experiments/EXP-036-precision-experiments.md).
+
 ### Objective
 
 Improve numerical fidelity through better weight representations.
 
 ### Checkpoints
 
-- [ ] C01: Evaluate multiple scaling granularities.
-- [ ] C02: Investigate outlier sensitivity.
-- [ ] C03: Evaluate clipping strategies.
-- [ ] C04: Test selective higher-precision weights.
-- [ ] C05: Measure layer-level error changes.
-- [ ] C06: Measure network-level effects.
-- [ ] C07: Document storage and conversion costs.
+- [x] C01: Evaluate multiple scaling granularities - per-column (accepted),
+  per-32-K-block, per-64-K-block and per-tensor on 54 real weight matrices.
+- [x] C02: Investigate outlier sensitivity - per-column element error is 18.66%
+  median but only 0.53% at the GEMM output; K averaging dominates.
+- [x] C03: Evaluate clipping strategies - activation clipping measured and
+  rejected in EXP-036; weight clipping was not selected.
+- [x] C04: Test selective higher-precision weights - block scaling is the
+  higher-precision weight option; it cuts output error only 11.6% jointly with
+  block activations, so it is not selected. Selective FP16 was measured at the
+  operator/network level instead (EXP-041 §6).
+- [x] C05: Measure layer-level error changes - per-operator relative RMS and
+  separated activation/weight contributions (EXP-041 §4).
+- [x] C06: Measure network-level effects - full-frame PSNR/SSIM and 9-frame
+  content sweep for every selected configuration.
+- [x] C07: Document storage and conversion costs - block scaling needs
+  `K/32` scales per output column and a block-scaled epilogue; the asymmetric
+  path needs one offset per token and one int32 column sum per output.
 
 ### Validation Gate
 
 Selected changes measurably improve fidelity on fixed validation inputs; changes and comparisons are reproducible.
+
+**PASS.** No weight-only change was selected, and that negative result is
+reproducible: the accepted per-column scheme is retained. The quality recovery
+comes from the activation representation, documented under M13.
 
 ### Expected Deliverables
 
@@ -957,24 +984,44 @@ Selected changes measurably improve fidelity on fixed validation inputs; changes
 
 ## M13 — Activation and Temporal Refinement
 
+**Status:** IN PROGRESS / **PASS for static activation refinement**; temporal
+checkpoints C06-C07 remain **BLOCKED** by the missing `reset = 0` path and
+labelled non-reset capture (M10). The accepted change is asymmetric activation
+encoding for the two non-negative operands, with full 76/76 INT8 coverage. See
+[EXP-041](experiments/EXP-041-quality-recovery.md).
+
 ### Objective
 
 Improve activation fidelity and temporal stability.
 
 ### Checkpoints
 
-- [ ] C01: Analyze activation distributions.
-- [ ] C02: Calibrate scaling and clipping.
-- [ ] C03: Investigate quantization boundaries.
-- [ ] C04: Evaluate normalization precision.
-- [ ] C05: Investigate residual accumulation.
-- [ ] C06: Test temporal state stability.
-- [ ] C07: Compare static and moving sequences.
-- [ ] C08: Identify necessary mixed-precision exceptions.
+- [x] C01: Analyze activation distributions - post-GELU and softmax P are
+  one-sided; Q/V/Wo/norm inputs are zero-centred.
+- [x] C02: Calibrate scaling and clipping - per-row max is best; clipping
+  percentiles are worse (EXP-036).
+- [x] C03: Investigate quantization boundaries - per-row asymmetric min/max for
+  MLP-down and P; 30-52% lower operator output error, **+0.263 dB** canonical.
+- [ ] C04: Evaluate normalization precision - norms remain the accepted FP16
+  stages; not changed.
+- [x] C05: Investigate residual accumulation - cumulative ablations and residual
+  boundaries measured (EXP-028/035); no arithmetic change selected.
+- [ ] C06: Test temporal state stability - **BLOCKED**, no cross-frame consumer.
+- [ ] C07: Compare static and moving sequences - static content sweep only;
+  motion is not implemented.
+- [x] C08: Identify necessary mixed-precision exceptions - attention, enc0,
+  merge and expand restores measured end to end; `enc0` + asymmetric is the best
+  measured quality/cost point, attention is not robust across content.
 
 ### Validation Gate
 
 Selected changes improve measured numerical or temporal fidelity without concealing unsupported behavior or changing the oracle.
+
+**PASS for the static change.** [M] Asymmetric encoding is bit-exact against an
+independent CPU reference on enc1 and dec1, keeps 76/76 operators and
+34,518,597,632 MACs, and improves the canonical frame by 0.263 dB and the
+9-frame mean by 0.27 dB. The 45 dB gate remains **FAIL**. No temporal claim is
+made.
 
 ### Expected Deliverables
 
@@ -1029,6 +1076,11 @@ Baseline comparisons are reproducible and use equivalent workloads, stated measu
 **PASS for the bounded comparison.** Interleaved repeats of the same frame give
 600.124 ms (FP16) vs 205.167 ms (INT8), **2.93x**, with every frame hash equal to
 the accepted M09 output. Peak VRAM and an optimized FP16 reference remain open.
+[EXP-041](experiments/EXP-041-quality-recovery.md) adds an independent
+interleaved block for the quality configurations: full INT8 195.628 ms,
+full INT8 + asym 201.241 ms (+2.9%), `enc0` FP16 + asym 214.555 ms (+9.7%),
+attention FP16 + asym 266.434 ms (+36.2%). Those deltas are relative to that
+block's baseline, not to the EXP-038 absolute numbers.
 
 ---
 
@@ -1061,7 +1113,9 @@ Improve native INT8 performance without exceeding fidelity limits.
 - [ ] C09: Evaluate wave occupancy and register pressure - no occupancy counter
   available; parallelism improved without measuring occupancy.
 - [x] C10: Measure complete-frame improvements - ~7-9.5% INT8 GPU time reduction,
-  bit-identical output (EXP-040).
+  bit-identical output (EXP-040). The quality-driven asymmetric encoding costs
+  2.9% GPU time for +0.263 dB; it is a fidelity change, not an optimization
+  (EXP-041).
 
 ### Validation Gate
 

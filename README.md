@@ -34,8 +34,12 @@ Evidence tags follow `docs/CONVENTIONS.md`: `[D]` documentation, `[S]` source ob
 **Out of scope:** Other DLSS presets, Ray Reconstruction, Frame Generation, FSR, NGX/DXGI interception, game-specific integration, unrelated GPU architectures, and a generalized ML framework.
 
 The work is organized in the [milestone roadmap](docs/MILESTONES.md). Phase I (M01–M04) and the Phase II probes M06–M08 are complete. M05's capture is complete at 1920×1080 for both resource kinds: every stage group including the `enc0`/`dec0` weight blobs ([EXP-008](docs/experiments/EXP-008-m05-full-capture.md)), and every texture and surface the image-bound stages bind, 33 targets whose contents reproduce the stage edges and the final frame byte for byte ([EXP-011](docs/experiments/EXP-011-m05-image-capture.md)). The layer-scope oracle replays bit-exactly ([EXP-003](docs/experiments/EXP-003-m05-layer-capture.md)). The native reconstruction now covers every stage: the fixture path and `downsample` reproduce their captures byte for byte ([EXP-012](docs/experiments/EXP-012-m05-native-downsample.md)), `dec0`'s operand and weight mapping comes from the kernel's own PTX ([EXP-014](docs/experiments/EXP-014-m05-dec0-mapping.md)), `enc0` and `post` are byte-exact ([EXP-015](docs/experiments/EXP-015-m05-enc0-contract.md), [EXP-016](docs/experiments/EXP-016-m05-post-reconstruction.md)), and the ten-layer network runs natively but is not yet byte-faithful: the chained `dec1` field reproduces 21.3% of the capture, so B5 remains in progress ([EXP-019](docs/experiments/EXP-019-m05-native-network.md)). M07 has closed the weight side: all 360 matrices (1 553 408 e4m3 values) are extracted and quantized at five scopes ([EXP-009](docs/experiments/EXP-009-m07-complete-inventory.md)). M09 and M10 are complete for the bounded matrix and reset-frame execution
-scope; cross-frame temporal reuse and the 45 dB image gate remain open, and the
-quality and performance work maps onto M11-M15.
+scope; cross-frame temporal reuse and the 45 dB image gate remain open. M12/M13
+measured the static quantization alternatives: per-K-block weight scaling was
+rejected, and asymmetric activation encoding for the two non-negative operands
+is accepted as an opt-in configuration, raising the canonical frame to 44.4026 dB
+with 76/76 INT8 operators ([EXP-041](docs/experiments/EXP-041-quality-recovery.md));
+the 45 dB gate still fails. Performance and quality work continues in M14-M15.
 
 ## Trace research workflow
 

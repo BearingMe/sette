@@ -68,6 +68,9 @@ set(SHADERS64
     "dec0_q8_matmul_cs.hlsl|main|dec0_q8_matmul.cso"
     "gemm_int8_cs.hlsl|main|gemm_int8_cs.cso"
     "swin_q8_quant_cs.hlsl|Quantize|swin_q8_quant.cso"
+    "swin_q8_quant_asym_cs.hlsl|Quantize|swin_q8_quant_asym.cso"
+    "swin_mlp_down_q8_asym_cs.hlsl|Down|swin_mlp_down_q8_asym.cso"
+    "swin_attention_pv_asym_cs.hlsl|PV|swin_attention_pv_asym.cso"
     "swin_q8_matmul_cs.hlsl|Matmul|swin_q8_matmul.cso")
 
 # The Swin block needs native 16-bit types: the contract rounds f64 sums and

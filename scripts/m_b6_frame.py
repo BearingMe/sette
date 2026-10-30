@@ -536,7 +536,7 @@ def main():
     ap.add_argument('--mlpup-frame', type=Path, help='MLP-up-only raw RGBA16F control')
     ap.add_argument('--fp16-frame', type=Path, help='baseline raw RGBA16F frame for direct error')
     ap.add_argument('--enc1q-frame', type=Path, help='enc1-Q-only raw RGBA16F control')
-    ap.add_argument('--cumulative-mode', choices=['none', 'qv', 'output', 'mlp', 'spatial'], default='none')
+    ap.add_argument('--cumulative-mode', choices=['none', 'qv', 'output', 'mlp', 'spatial', 'selective'], default='none')
     ap.add_argument('--cumulative-layers', type=Path, help='fixed ten-layer cumulative fixtures')
     ap.add_argument('--previous-frame', type=Path, help='previous accepted cumulative raw frame')
     ap.add_argument('--timing-dir', type=Path, default=None,
@@ -545,10 +545,14 @@ def main():
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.cumulative_mode == 'none' and a.cumulative_layers:
         ap.error('--cumulative-layers requires an explicit cumulative mode')
-    if a.attention_mode!='fp16' and a.cumulative_mode!='spatial':
+    if a.attention_mode!='fp16' and a.cumulative_mode not in ('spatial','selective'):
         ap.error('INT8 attention requires the cumulative spatial graph')
     if a.cumulative_mode != 'none':
-        if any(m != 'fp16' for m in (a.q_mode, a.dec0_mode, a.mlp_mode)) or not a.cumulative_layers:
+        # `selective` explicitly combines the mixed layer graph with the two
+        # image-stage precision flags; the layer graph itself is audited.
+        flags = (a.q_mode, a.mlp_mode) if a.cumulative_mode == 'selective' else (
+            a.q_mode, a.dec0_mode, a.mlp_mode)
+        if any(m != 'fp16' for m in flags) or not a.cumulative_layers:
             ap.error('cumulative mode requires its own layer fixtures, not independent precision flags')
         import m_layer_suite as suite
         for label in suite.LABELS:
@@ -557,9 +561,16 @@ def main():
                 ap.error('cumulative fixture batch does not match requested mode')
             if bool(record.get('int8_attention')) != (a.attention_mode=='int8'):
                 ap.error('attention mode and actual layer graph disagree')
-        import m09_cumulative as cumulative
-        cumulative.audit_config(a.cumulative_layers, a.cumulative_mode)
-        if a.cumulative_mode == 'spatial': a.dec0_mode = 'int8-expansion'
+        if a.cumulative_mode == 'selective':
+            import m13_selective as selective
+            checked = selective.audit(a.cumulative_layers)
+            if checked['status'] != 'PASS':
+                ap.error('selective fixture audit failed: ' + '; '.join(checked['problems'][:4]))
+            # enc0/dec0 are independent image stages and stay explicit flags here.
+        else:
+            import m09_cumulative as cumulative
+            cumulative.audit_config(a.cumulative_layers, a.cumulative_mode)
+            if a.cumulative_mode == 'spatial': a.dec0_mode = 'int8-expansion'
     if a.mlp_mode != 'fp16' and a.enc1_mlp is None:
         ap.error('an INT8 MLP mode needs --enc1-mlp')
     FIXTURES, LAYERS = a.fixtures, a.layers
