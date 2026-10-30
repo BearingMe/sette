@@ -61,9 +61,12 @@ contract tests with independent oracles
 ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured
 weight set is quantized to INT8 at five scopes
 ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408
-values, per-column 16-row K blocks best (0.0048 RMS). M09 has begun with one bounded
-native INT8 matrix operation whose ISA, integer product and quantisation error are all
-measured ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)). Phase I evidence: the
+values, per-column 16-row K blocks best (0.0048 RMS). M09 has begun: one bounded INT8
+matrix operation whose ISA, integer product and quantisation error are measured
+([EXP-021](experiments/EXP-021-m09-int8-gemm.md)), and then enc1's Q projection replaced
+inside the live graph and validated bit for bit against an independent CPU reference,
+with the cost measured through the layer, the chain and the frame
+([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)). Phase I evidence: the
 Windows/D3D12/DXC toolchain and pinned quattro reference
 ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and
 numerical contract are in
@@ -633,8 +636,8 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 
 ## M09 — INT8 Kernel Reconstruction
 
-**Status:** IN PROGRESS / PENDING — one bounded operator experiment passes; the
-representative-layer gate does not.
+**Status:** IN PROGRESS / PENDING — one projection is integrated in the live graph and
+validated bit for bit; the representative-layer gate is still open.
 
 ### Objective
 
@@ -642,39 +645,46 @@ Implement the neural matrix operations required by Preset M.
 
 ### Checkpoints
 
-- [ ] C01: Implement INT8 matrix kernels. **Partial:** one native INT8 GEMM
-  (`src/native/gemm_int8_cs.hlsl`, `dot4add_i8packed`, `cs_6_4`) covers a single matrix
-  shape; attention, MLP, merge/expand layouts and fusion are not implemented.
-- [ ] C02: Support required tensor layouts. **Partial:** the case format supplies
-  row-major activations and per-column K-major weights; the captured plane-major token
-  field is converted outside the kernel.
-- [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric INT8
-  with per-output-column weight scales and per-row activation scales is implemented and
-  measured; per-K-block scales, clipping and asymmetric encodings are not.
+- [ ] C01: Implement INT8 matrix kernels. **Partial:** two kernels exist — the
+  standalone GEMM of [EXP-021](experiments/EXP-021-m09-int8-gemm.md) and the in-graph
+  Q projection of [EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) (encode + matmul
+  entry points, `dot4add_i8packed`, `cs_6_4`). Attention, MLP and the merge/expand
+  matrices are not implemented.
+- [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
+  per-column K-major f32 weights, both quantised to INT8 on the same word layout the
+  graph uses; the captured plane-major token field is still converted outside a kernel.
+- [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric
+  INT8 with one scale per activation row and one per output column, zero-row handling,
+  clamping and the f16 output boundary are implemented and measured in the graph;
+  per-K-block scales, clipping and asymmetric encodings are not.
 - [ ] C04: Support necessary floating-point operations and document each exception.
-  **Partial:** the f32 epilogue (two multiplies and a bias add) is the only floating-point
-  step in the kernel and is documented.
-- [ ] C05: Validate representative layers.
-- [x] C06: Compare outputs against CPU INT8 references — the GPU product equals an
-  independent CPU INT8 reference to `9.60e-7` (f32 epilogue only) on the captured `dec0`
-  expansion matrix ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
-- [x] C07: Inspect generated GPU ISA — `v_dot4_i32_i8` confirmed for gfx1101 with RGA
-  2.15 on the same `.cso` that executes ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
-- [x] C08: Measure numerical error before optimization — INT8 vs the FP16 operator on
-  identical operands is 0.009915 relative, equal to the quantisation-only bound 0.009914
-  (weight side 0.005784, activation side 0.007395)
-  ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
+  **Partial:** the f32 epilogue (two multiplies) and the single f16 RNE conversion are
+  documented; attention's own E4M3 re-quantisation of the Q output is recorded as the
+  next boundary, not implemented in INT8.
+- [ ] C05: Validate representative layers. **Open.** One of ten layers has been run
+  with one replaced projection.
+- [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
+  **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
+  with 8/8 independent scalar dot probes agreeing
+  ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)).
+- [x] C07: Inspect generated GPU ISA — 16 `v_dot4_i32_i8` for K = 64 and zero FP16
+  matrix instructions in the executed `swin_q8_matmul.cso`
+  ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §5); `v_dot4_i32_i8` also
+  confirmed for the standalone GEMM ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
+- [x] C08: Measure numerical error before optimization — Q 1.50% relative RMS, enc1
+  out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
+  for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
 
 ### Validation Gate
 
-Representative reconstructed layers execute correctly on gfx1101 against independent CPU
-INT8 references, and generated ISA confirms the intended native matrix arithmetic.
+Representative reconstructed layers execute correctly on gfx1101 against independent
+CPU INT8 references, and generated ISA confirms the intended native matrix arithmetic.
 
-**PENDING.** The gate is met for one matrix operation, not for representative layers:
-C01-C04 are partial and C05 is open. The next bounded step is a matrix whose operand is
-already in the network's plane-major layout (`enc1`'s Q projection), then one dispatch
-replaced inside the chain graph with the stage output difference measured against the FP16
-stage. INT8 correctness, not image quality or speed, remains the priority.
+**PENDING.** One projection of one layer is now integrated and validated end to end —
+bit-exact against the CPU reference, native ISA confirmed, one dispatch replaced, the
+rest of the graph byte-identical, the hybrid chain and frame deterministic and finite.
+The gate needs C05: more representative layers (decoder expansion, the MLP pair, and
+the plane-major token field) and, for each, the same differential treatment.
 
 ### Expected Deliverables
 
