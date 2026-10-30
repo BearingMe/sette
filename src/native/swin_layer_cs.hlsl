@@ -463,6 +463,9 @@ void Mlp(uint3 id : SV_DispatchThreadID)
         uint w1 = pOffW1 + chunk * pC * 32u;
         uint b1 = pOffB1 + chunk * 32u;
         float z[32];
+#ifdef MLP_LOAD_UP
+        for (uint j = 0; j < 32u; ++j) z[j] = MLP_LOAD_UP(tok, chunk, j);
+#else
         for (uint j = 0; j < 32u; ++j) z[j] = asfloat(B1[b1 + j]);
         for (uint k0 = 0; k0 < pC; k0 += 32u)
         {
@@ -478,6 +481,7 @@ void Mlp(uint3 id : SV_DispatchThreadID)
             for (uint j = 0; j < 32u; ++j)
                 z[j] = R16D(sum[j] + (double)z[j]);
         }
+#endif
         float g[32];
         for (uint j = 0; j < 32u; ++j) g[j] = GeluQ(z[j]);
         uint w2 = pOffW2 + chunk * 32u * pC;

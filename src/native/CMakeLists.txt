@@ -48,6 +48,7 @@ set(SHADERS
 # its own target so the FP16 and reconstruction shaders keep their SM 6.2
 # code generation (and their measured outputs) unchanged.
 set(SHADERS64
+    "swin_mlp_up_q8_cs.hlsl|Up|swin_mlp_up_q8.cso"
     "dec0_q8_layout_cs.hlsl|Quantize|dec0_q8_quant.cso"
     "dec0_q8_layout_cs.hlsl|FP16|dec0_expansion_f16.cso"
     "dec0_q8_matmul_cs.hlsl|main|dec0_q8_matmul.cso"
@@ -59,6 +60,8 @@ set(SHADERS64
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
 # 16bit-types` provides (`(half)` from double is a single conversion).
 set(SHADERS16
+    "swin_mlp_up_epilogue_cs.hlsl|Mlp|swin_mlp_up_epilogue.cso"
+    "swin_mlp_up_probe_cs.hlsl|Up|swin_mlp_up_probe.cso"
     "swin_layer_cs.hlsl|Prepare|swin_prepare.cso"
     "swin_layer_cs.hlsl|Norm|swin_norm.cso"
     "swin_layer_cs.hlsl|Matmul|swin_matmul.cso"
@@ -95,7 +98,7 @@ foreach(entry IN LISTS SHADERS16)
         OUTPUT "${artifact}"
         COMMAND "${DXC_EXECUTABLE}" -T cs_6_2 -E "${entrypoint}" -O3
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
-        DEPENDS "${input}"
+        DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/swin_layer_cs.hlsl"
         COMMENT "dxc ${source}:${entrypoint} -> ${output}")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()

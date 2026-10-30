@@ -158,7 +158,7 @@ def _parse_graph(path):
     return resources, stages, dumps
 
 
-def build_chain(directory, out, q_int8=False, enc1_int8=None):
+def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, enc1_mlp=None):
     """Concatenate the ten layer graphs, remapping every produced field.
 
     A resource `<layer>_<name>` is local to that layer, except the fields named
@@ -173,6 +173,13 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None):
     resources, stages, dumps = [], [], []
     produced = {}
     overrides = {}
+    if mlp_int8:
+        if q_int8 or not enc1_mlp:
+            raise SystemExit('MLP INT8 requires its own enc1 fixture and cannot combine modes')
+        record = json.load(open(os.path.join(enc1_mlp, 'fixture.json')))
+        if record.get('mlp_mode') != 'int8-up' or record.get('q_mode', 'fp16') != 'fp16':
+            raise SystemExit('expected an enc1 INT8-up-only fixture')
+        overrides['enc1'] = enc1_mlp
     if q_int8:
         if not enc1_int8:
             raise SystemExit('q_int8 needs the INT8 enc1 fixture directory (enc1_int8)')
@@ -180,7 +187,7 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None):
     for label, name in zip(LABELS, STAGE_NAMES):
         path = overrides.get(label) or fixture(directory, label)
         local_dir = path
-        layer_resources, layer_stages, _ = _parse_graph(os.path.join(path, 'graph.txt'))
+        layer_resources, layer_stages, local_dumps = _parse_graph(os.path.join(path, 'graph.txt'))
         record = json.load(open(os.path.join(path, 'fixture.json')))
         outputs = record['outputs']
         # names this layer produces, keyed by role
@@ -192,6 +199,10 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None):
                 if words[0] == 'uav' and words[2] == 'merge':
                     role_resource['merge'] = words[2]
         rename = lambda n: f'{re.sub(r"[^A-Za-z0-9]+", "_", label)}_{n}'
+        if mlp_int8 and label == 'enc1':
+            for d in local_dumps:
+                if d['file'].startswith('dbg-'):
+                    dumps.append(f'dump {rename(d["resource"])} {d["offset"]} {d["bytes"]} enc1-{d["file"]}')
         for r in layer_resources:
             entry = {'name': rename(r['name']), 'bytes': r['bytes'], 'init': None}
             if r['init']:
@@ -250,6 +261,10 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None):
             raise SystemExit(f'hybrid chain: unexpected enc1 stages {replaced}')
 
     final = produced['dec1.out']
+    if mlp_int8:
+        selected = [s for s in stages if s['name'].startswith('enc1.mlp')]
+        if [s['name'] for s in selected] != ['enc1.mlp-quant', 'enc1.mlp-up', 'enc1.mlp']:
+            raise SystemExit('unexpected MLP-only stage sequence')
     lines = ['version 1']
     for r in resources:
         lines.append(f'resource {r["name"]} {r["bytes"]}' +
@@ -269,6 +284,7 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None):
     bytes_ = json.load(open(os.path.join(fixture(directory, 'dec1'), 'fixture.json')))[
         'outputs']['out']['bytes']
     lines.append(f'dump {final} 0 {bytes_} out-dec1.bin')
+    lines.extend(dumps)
     open(os.path.join(out, 'graph.txt'), 'w').write('\n'.join(lines) + '\n')
     print(f'chain: {len(stages)} dispatches, {len(resources)} resources -> {out}')
     return {'stages': len(stages), 'resources': len(resources),

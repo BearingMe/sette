@@ -28,6 +28,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -190,7 +191,8 @@ public:
         UINT flags = 0;
         const bool wantDebug = GetEnvironmentVariableW(L"M_STAGE_DEBUG", nullptr, 0) > 0;
         ComPtr<ID3D12Debug> debug;
-        if (wantDebug && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+        if (wantDebug) {
+            Check(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)), "D3D12 debug layer required");
             debug->EnableDebugLayer();
             flags |= DXGI_CREATE_FACTORY_DEBUG;
         }
@@ -211,6 +213,7 @@ public:
             }
         }
         if (!device_) throw std::runtime_error("no D3D12 device at feature level 12_0");
+        if (wantDebug) Check(device_.As(&infoQueue_), "ID3D12InfoQueue");
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         Check(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options,
@@ -292,6 +295,22 @@ public:
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
         WaitForSingleObject(event_, INFINITE);
 
+        if (infoQueue_) {
+            const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
+            for (UINT64 i = 0; i < count; ++i) {
+                SIZE_T size = 0;
+                Check(infoQueue_->GetMessage(i, nullptr, &size), "InfoQueue size");
+                std::vector<uint8_t> bytes(size);
+                auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+                Check(infoQueue_->GetMessage(i, message, &size), "InfoQueue message");
+                if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                    message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)
+                    throw std::runtime_error(std::string("D3D12 validation: ") + message->pDescription);
+                if (message->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
+                    std::printf("D3D12 warning: %s\n", message->pDescription);
+            }
+            std::printf("D3D12 debug: zero error/corruption messages (%llu total)\n", count);
+        }
         fs::create_directories(outputDir);
         for (size_t i = 0; i < g.dumps.size(); ++i) {
             void* mapped = nullptr;
@@ -341,7 +360,7 @@ private:
         desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                               D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                IID_PPV_ARGS(&r.gpu)),
               "CreateCommittedResource");
         std::vector<uint8_t> init(static_cast<size_t>(r.bytes));
@@ -368,14 +387,9 @@ private:
 
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
+        Transition(r, D3D12_RESOURCE_STATE_COPY_DEST);
         list_->CopyBufferRegion(r.gpu.Get(), 0, upload.Get(), 0, r.bytes);
-        D3D12_RESOURCE_BARRIER barrier{};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = r.gpu.Get();
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
-        list_->ResourceBarrier(1, &barrier);
+        Transition(r, D3D12_RESOURCE_STATE_COMMON);
         Check(list_->Close(), "Close(init)");
         ID3D12CommandList* lists[] = {list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
@@ -385,6 +399,12 @@ private:
     }
 
     void Prepare(Stage& s, Graph& g) {
+        uint32_t srv = 0, uav = 0;
+        for (const Binding& b : s.bindings) {
+            const uint32_t expected = b.input ? srv++ : uav++;
+            if (b.reg != expected)
+                throw std::runtime_error("bindings must be declared in register order: " + s.name);
+        }
         auto code = ReadFile(s.shader);
         const uint32_t srvCount = Count(s, true), uavCount = Count(s, false);
         s.signature = MakeRootSignature(srvCount, uavCount);
@@ -404,7 +424,7 @@ private:
         const UINT stride = device_->GetDescriptorHandleIncrementSize(
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_CPU_DESCRIPTOR_HANDLE cpu = s.heap->GetCPUDescriptorHandleForHeapStart();
-        uint32_t srv = 0, uav = 0;
+        srv = 0; uav = 0;
         for (const Binding& b : s.bindings) {
             Resource& r = g.Find(b.resource);
             const uint32_t at = b.input ? srv++ : srvCount + uav++;
@@ -499,6 +519,7 @@ private:
     }
 
     ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12InfoQueue> infoQueue_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<ID3D12CommandAllocator> allocator_;
     ComPtr<ID3D12GraphicsCommandList> list_;

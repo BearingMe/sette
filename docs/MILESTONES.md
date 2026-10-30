@@ -636,11 +636,11 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 
 ## M09 — INT8 Kernel Reconstruction
 
-**Status:** IN PROGRESS / PENDING — one projection is integrated in the live graph and
-validated bit for bit; dec0's physical-layout expansion now feeds the original
-surface epilogue and a deterministic dec0-only hybrid frame
-([EXP-025](experiments/EXP-025-m09-dec0-int8-frame.md)). The representative-layer
-gate is still open.
+**Status:** IN PROGRESS / PENDING — enc1 Q, dec0 expansion and enc1 MLP up each
+execute as independently validated INT8 modes. The MLP up projection now runs
+inside the real 96-dispatch neural chain and a deterministic full frame
+([EXP-026](experiments/EXP-026-m09-enc1-int8-mlp-up.md)). The representative-layer
+gate remains open; these are not combined modes or a complete INT8 network.
 
 ### Objective
 
@@ -656,12 +656,16 @@ Implement the neural matrix operations required by Preset M.
   over all 130,560 rows ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md));
   its original nonlinear/surface stage now consumes that INT8 expansion through
   an optional GPU-resident prefix (EXP-025); the other matrices remain unchanged.
+  Enc1's full 64×256 MLP up projection now executes with native INT8; GELU, the
+  256×64 down projection and residual arithmetic remain unchanged (EXP-026).
 - [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
   per-column K-major f32 weights, both quantised to INT8 on the same word layout the
   graph uses. A second path now reads plane-major E4M3 directly on GPU and consumes
   offline-quantized blocked dec0 weights, with all physical offsets independently
   checked ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md)). Other required
   layouts and runtime blocked-weight conversion remain open.
+  EXP-026 additionally validates enc1's eight blocked W1 chunks/bias vectors and
+  supplies a natural-order row-major f16 pre-GELU boundary without host activations.
 - [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric
   INT8 with one scale per activation row and one per output column, zero-row handling,
   clamping and the f16 output boundary are implemented and measured in the graph;
@@ -671,40 +675,57 @@ Implement the neural matrix operations required by Preset M.
   documented; attention's own E4M3 re-quantisation of the Q output is recorded as the
   next boundary, not implemented in INT8. Dec0's E4M3 round-trip and floating-point
   nonlinear/surface epilogue are preserved as explicit exceptions (EXP-025).
+  MLP up adds bias in f32 then writes f16 RNE; original GELU/E4M3 conversion,
+  down k32 accumulation and residual operations remain floating-point (EXP-026).
 - [ ] C05: Validate representative layers. **Open.** One of ten layers has been run
   with one replaced projection. Dec0 now passes both captured/native-token stage
   comparisons and a dec0-only hybrid frame; EXP-024's deferred C5/C6 boundary is
-  resolved in EXP-025. The MLP pair and other representative operators remain open.
+  resolved in EXP-025. Enc1's MLP up is now CPU/GPU bit-exact in the actual graph,
+  with verified original-remainder handoff and full-frame propagation (EXP-026).
+  The MLP down projection and other representative operators remain open.
 - [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
   **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
   with 8/8 independent scalar dot probes agreeing
   ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)). Dec0's 10,444,800 integer,
   f32 and f16 outputs also agree exactly, with 48 scalar dot checks (EXP-024).
+  MLP up's 34,979,840 accumulators/f32/f16 outputs agree bit for bit, with 48
+  scalar dot probes, all-column scalar weight checks and synthetic GPU cases (EXP-026).
 - [x] C07: Inspect generated GPU ISA — 16 `v_dot4_i32_i8` for K = 64 and zero FP16
   matrix instructions in the executed `swin_q8_matmul.cso`
   ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §5); `v_dot4_i32_i8` also
   confirmed for the standalone GEMM ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
   EXP-024 confirms native dot4 and no FP16 matrix fallback in the hashed dec0 shader.
+  EXP-026 confirms 16 static dot4 and zero FP16 matrix instructions in the
+  executed MLP-up shader, with inspected/executed hashes matched.
 - [x] C08: Measure numerical error before optimization — Q 1.50% relative RMS, enc1
   out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
   for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
   Dec0 expansion: 0.5259% relative RMS vs native FP16, zero CPU/GPU implementation
   error (EXP-024). Dec0-only hybrid: 47.0249 dB vs canonical, direct hybrid-vs-FP16
   62.9160 dB / RMS 0.000714826, 15 deterministic boundaries (EXP-025).
+  MLP up: 1.0002% relative RMS, enc1 out/merge 4.6447%/6.1756%, chained dec1
+  13.5094% vs FP16; MLP-only frame 45.9208 dB vs canonical, direct FP16 comparison
+  45.4375 dB, 18 deterministic boundaries. All three earlier frame hashes remain
+  unchanged; 314 tests pass (EXP-026).
 
 ### Validation Gate
 
 Representative reconstructed layers execute correctly on gfx1101 against independent
 CPU INT8 references, and generated ISA confirms the intended native matrix arithmetic.
 
-**PENDING.** One projection of one layer is now integrated and validated end to end —
-bit-exact against the CPU reference, native ISA confirmed, one dispatch replaced, the
-rest of the graph byte-identical, the hybrid chain and frame deterministic and finite.
-The gate needs C05: more representative complete layer behavior and the MLP pair.
+**PENDING.** Enc1 Q, dec0 expansion and enc1 MLP up are independently integrated
+and validated end to end: bit-exact CPU arithmetic, native ISA, original handoffs,
+and deterministic finite hybrid chains/frames. The gate still needs C05: more
+representative complete layer behavior and the MLP down projection.
 The decoder expansion and plane-major operand pass isolated C1–C4 (EXP-024) and
 now feed dec0's typed image outputs and a full hybrid frame (EXP-025). No milestone
-completion is inferred from two independently integrated projections. Temporal
+completion is inferred from three independently integrated matrix paths. Temporal
 fidelity and the existing B5 failure are unchanged.
+
+**Next priority:** systematic matrix-family INT8 coverage in the existing real
+graph toward M10, starting with completing the MLP pair under authorized scope.
+Keep independent CPU/ISA/handoff checks as integration gates rather than creating
+another detached experiment track. No M10 advancement or combined mode is implied.
 
 ### Expected Deliverables
 

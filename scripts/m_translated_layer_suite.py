@@ -121,8 +121,12 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--refresh-sette-from', type=Path,
+                    help='remeasure only D3D12 Sette against an archived translated suite; no HIP')
+    ap.add_argument('--refresh-chain-baseline', type=Path,
+                    help='archived FP16 chain outputs for the Sette-only refresh')
     for key in LAYERS:
-        ap.add_argument(f'--{key}', type=Path, required=True)
+        ap.add_argument(f'--{key}', type=Path)
     for key in ('enc1', 'enc2', 'tube', 'dec2', 'dec1'):
         ap.add_argument(f'--chain-{key}', type=Path, default=None)
     ap.add_argument('--sette-chain', type=Path, default=Path(DEFAULT_LAYERS, 'chain', 'results'))
@@ -130,6 +134,12 @@ def main():
     ap.add_argument('--resume', action='store_true',
                     help='reuse completed layer contracts already in --out')
     a = ap.parse_args()
+    if a.refresh_sette_from:
+        if not a.refresh_chain_baseline:
+            ap.error('--refresh-sette-from requires --refresh-chain-baseline')
+        return refresh_sette(a.refresh_sette_from, a.out, a.refresh_chain_baseline)
+    if not all(getattr(a, key) for key in LAYERS):
+        ap.error('all layer captures are required unless --refresh-sette-from is used')
     a.out = a.out.resolve()
     a.out.mkdir(parents=True, exist_ok=a.resume)
     summary = {'layers': {}, 'status': 'running'}
@@ -180,6 +190,67 @@ def main():
     summary['status'] = 'pass' if all(v['status'] == 'pass' for v in summary['layers'].values()) else 'fail'
     (a.out / 'summary.json').write_text(json.dumps(summary, indent=2))
     return 0 if summary['status'] == 'pass' else 1
+
+
+def refresh_sette(source, out, chain_baseline):
+    """Rerun a new host executable without rebuilding/rerunning pinned references.
+
+    Preserve archived oracle claims only after all Sette fields reproduce their
+    archived bytes exactly. Never relabel an old measurement with a new hash.
+    """
+    from m09_enc1_q import sha
+    source, out = source.resolve(), out.resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    summary = json.loads((source / 'summary.json').read_text())
+    repo = Path(__file__).resolve().parents[1]
+    probe, shaders = repo / 'build/native/Release/m_network_stage.exe', repo / 'build/native'
+    checks, commands = {}, []
+    for label, entry in summary['layers'].items():
+        tag = label.replace('#', '-')
+        fixture = source / f'{tag}-fixture'
+        runs = []
+        for seed in (0, 1):
+            dest = out / f'{tag}-sette-{seed}'
+            command = [str(probe), '--graph', str(fixture / 'graph.txt'), '--out', str(dest),
+                       '--shaders', str(shaders), '--seed', str(seed)]
+            done = subprocess.run(command, capture_output=True, text=True)
+            (out / f'{tag}-{seed}.log').write_text(done.stdout + done.stderr)
+            if done.returncode:
+                raise RuntimeError(f'{label}: Sette refresh failed')
+            commands.append(command)
+            runs.append(dest)
+        record = json.loads((fixture / 'fixture.json').read_text())
+        for role in record['outputs']:
+            name = f'out-{role}.bin'
+            checks[f'{label}.{role}'] = sha(runs[0] / name) == sha(runs[1] / name) == sha(
+                source / f'{tag}-contract/sette-0' / name)
+    if not all(checks.values()):
+        (out / 'refresh-failure.json').write_text(json.dumps(checks, indent=2))
+        raise RuntimeError('Sette changed numerically; archived pair metrics cannot be reused')
+    chain = out / 'chain'
+    import m_layer_suite as suite
+    suite.build_chain(DEFAULT_LAYERS, str(chain))
+    for seed in (0, 1):
+        lf.run(str(chain), str(probe), str(shaders), seed, str(chain / f'results-{seed}'))
+    for label, entry in summary['chain'].items():
+        name = f'out-{label.replace("#", "-")}-out.bin'
+        checks['chain.' + label] = sha(chain / 'results-0' / name) == sha(chain / 'results-1' / name) == sha(
+            chain_baseline / name)
+    refresh = {'source_summary_sha256': sha(source / 'summary.json'), 'checks': checks,
+               'chain_baseline': str(chain_baseline),
+               'chain_baseline_hashes': {p.name: sha(p) for p in chain_baseline.glob('out-*.bin')},
+               'commands': commands, 'status': 'PASS' if all(checks.values()) else 'FAIL'}
+    (out / 'refresh.json').write_text(json.dumps(refresh, indent=2))
+    if not all(checks.values()):
+        raise RuntimeError('Sette chain changed; archived chain metrics cannot be reused')
+    summary['sette_remeasurement'] = {'source': str(source / 'summary.json'),
+        'validation': str(out / 'refresh.json'), 'validation_sha256': sha(out / 'refresh.json'),
+        'method': 'fresh two-seed D3D12 runs, byte-identical to all archived independent and chain fields'}
+    summary['sette_execution'] = {'probe': str(probe), 'probe_sha256': sha(probe),
+        'shaders': {p.name: sha(p) for p in shaders.glob('swin_*.cso')}}
+    (out / 'summary.json').write_text(json.dumps(summary, indent=2))
+    print(f'Sette-only refresh PASS: {len(checks)} byte-identical fields; archived references unchanged')
+    return 0
 
 
 if __name__ == '__main__':

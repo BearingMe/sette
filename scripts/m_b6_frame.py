@@ -128,10 +128,12 @@ def declared_outputs(stage_txt):
     return out
 
 
-def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None):
+def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None,
+                mlp_int8=False, enc1_mlp=None):
     sys.path.insert(0, str(HERE))
     import m_layer_suite as suite
-    info = suite.build_chain(str(layers), str(out), q_int8=q_int8, enc1_int8=enc1_int8)
+    info = suite.build_chain(str(layers), str(out), q_int8=q_int8, enc1_int8=enc1_int8,
+                             mlp_int8=mlp_int8, enc1_mlp=enc1_mlp)
     graph = out / 'graph.txt'
     lines = graph.read_text().splitlines()
     replaced = False
@@ -146,12 +148,13 @@ def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None):
     return info
 
 
-def run_chain(network_probe, chain_dir, out, shaders):
+def run_chain(network_probe, chain_dir, out, shaders, seed=0):
     done = subprocess.run([str(network_probe), '--graph', str(chain_dir / 'graph.txt'),
-                           '--out', str(out), '--shaders', str(shaders), '--seed', '0'],
+                            '--out', str(out), '--shaders', str(shaders), '--seed', str(seed)],
                           capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f'chain: {done.stdout[-600:]}{done.stderr[-600:]}')
+    (Path(out) / 'execution.log').write_text(done.stdout + done.stderr)
     return Path(out) / 'out-dec1.bin'
 
 
@@ -367,7 +370,14 @@ def input_manifest(a):
             continue
         layers[directory.name] = {p.name: sha(p) for p in sorted(directory.iterdir())
                                   if p.is_file()}
+    overrides = {}
+    for name in ('enc1_int8', 'enc1_mlp'):
+        directory = getattr(a, name, None)
+        if directory:
+            overrides[name] = {p.name: sha(p) for p in sorted(directory.iterdir()) if p.is_file()}
     return {'probe_sha256': sha(a.probe), 'network_probe_sha256': sha(a.network_probe),
+             'enc1_overrides': overrides,
+             'mlp_mode': getattr(a, 'mlp_mode', 'fp16'),
              'dec0_mode': getattr(a, 'dec0_mode', 'fp16'),
              'q_mode': getattr(a, 'q_mode', 'fp16'),
             'shaders': {p.name: sha(p) for p in sorted(a.shaders.glob('*.cso'))},
@@ -471,9 +481,9 @@ def verify_reuse(previous, manifest, hashes):
     return recorded
 
 
-def validate_precision_modes(q_mode, dec0_mode):
-    if q_mode != 'fp16' and dec0_mode != 'fp16':
-        raise SystemExit('combining enc1-Q and dec0 INT8 is not authorized for this experiment')
+def validate_precision_modes(q_mode, dec0_mode, mlp_mode='fp16'):
+    if sum(mode != 'fp16' for mode in (q_mode, dec0_mode, mlp_mode)) > 1:
+        raise SystemExit('combining experimental INT8 modes is not authorized')
 
 
 def main():
@@ -498,10 +508,15 @@ def main():
     ap.add_argument('--enc1-int8', type=Path, default=None,
                     help='enc1 fixture containing the INT8 Q projection')
     ap.add_argument('--dec0-mode', choices=['fp16', 'int8-expansion'], default='fp16')
+    ap.add_argument('--mlp-mode', choices=['fp16', 'int8-up'], default='fp16')
+    ap.add_argument('--enc1-mlp', type=Path, help='enc1 INT8-up-only fixture')
+    ap.add_argument('--dec0-frame', type=Path, help='dec0-only raw RGBA16F control')
     ap.add_argument('--fp16-frame', type=Path, help='baseline raw RGBA16F frame for direct error')
     ap.add_argument('--enc1q-frame', type=Path, help='enc1-Q-only raw RGBA16F control')
     a = ap.parse_args()
-    validate_precision_modes(a.q_mode, a.dec0_mode)
+    validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
+    if a.mlp_mode != 'fp16' and a.enc1_mlp is None:
+        ap.error('--mlp-mode int8-up needs --enc1-mlp')
     FIXTURES, LAYERS = a.fixtures, a.layers
     for path in (a.probe, a.network_probe, a.shaders):
         if not path.exists():
@@ -519,6 +534,7 @@ def main():
               'inputs': manifest, 'scripts': {'m_b6_frame.py': sha(__file__)},
               'q_mode': a.q_mode, 'enc1_int8': (str(a.enc1_int8) if a.enc1_int8 else None),
               'dec0_mode': a.dec0_mode,
+              'mlp_mode': a.mlp_mode,
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
               'boundaries': {}, 'missing_outputs': []}
 
@@ -528,16 +544,20 @@ def main():
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
         build_chain(LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
-                    enc1_int8=a.enc1_int8)
+                    enc1_int8=a.enc1_int8, mlp_int8=a.mlp_mode == 'int8-up', enc1_mlp=a.enc1_mlp)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
-                         a.shaders)
+                          a.shaders, seed=1 if tag == 'repeat' and a.mlp_mode != 'fp16' else 0)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None)
         full = {'enc0': {'fixture': FIXTURES / 'enc0', 'results': enc0},
                 'chain': {'file': dec1}, **stages['stages']}
+        hashes = boundary_hashes(full)
+        if a.mlp_mode != 'fp16':
+            for p in sorted(dec1.parent.glob('enc1-dbg-*.bin')):
+                hashes['chain/' + p.stem] = sha(p)
         return {'tokens': tokens, 'dec1': dec1, 'frame': stages['frame'],
-                'stages': full, 'hashes': boundary_hashes(full),
+                'stages': full, 'hashes': hashes,
                 'chain_graph_sha256': sha(chain_dir / 'graph.txt')}
 
     def reuse(tag):
@@ -612,7 +632,8 @@ def main():
 
     native_frame = frame(native['frame'])
     report['direct_comparisons'] = {}
-    for label, source in [('hybrid-vs-fp16', a.fp16_frame), ('hybrid-vs-enc1q', a.enc1q_frame)]:
+    for label, source in [('hybrid-vs-fp16', a.fp16_frame), ('hybrid-vs-enc1q', a.enc1q_frame),
+                          ('hybrid-vs-dec0', a.dec0_frame)]:
         if source is None:
             continue
         base = frame(source)
