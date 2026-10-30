@@ -887,3 +887,196 @@ python scripts/m_conformance.py --network --json "$T\k32-NEW\b4-b5.json"
 The last command is expected to fail B5, not B4. No proprietary binaries,
 weights, PTX dumps or captured tensors are added to Git; the pinned submodule
 remains unchanged. No downstream matrix investigation or B6/B7 work was started.
+
+## Addendum: translated-PTX reference for all ten layers and the complete chain (2026-10-29)
+
+**Mode A (independent layers) and mode B (complete chain) both executed. The chain
+gate cannot be satisfied by the original PTX itself. B5 remains IN PROGRESS / FAIL at
+its unchanged 99% chain floor. No arithmetic, threshold or fixture was changed.**
+
+### 1. Execution provenance
+
+`scripts/m_capture_translated.py` (renamed from `m_capture_translated_enc1.py`; the
+enc1 behaviour is unchanged) writes a private native allowlist, copies every other
+native module unchanged, removes the named `D4R_*`/`ZLUDA_*` inherited settings, and
+records the executable, DLL, command and complete environment in `run.json`. The
+translation settings are the enc1 reference's: `D4R_ZLUDA_WMMA=1`,
+`D4R_ZLUDA_WMMA_FP8=1`, `D4R_ZLUDA_WMMA_FP8_NATIVE=0`,
+`D4R_ZLUDA_WMMA_F16_REFERENCE=1`, gfx1101, and a per-run ZLUDA cache directory.
+
+[M] Every capture in this addendum has `backend=translated` for the selected kernel,
+zero `backend=native` dispatches of it, no `module_direct` shortcut, exactly one
+translated dispatch per expected launch, and one dumped PTX module whose identity hash
+equals the manifest entry for that kernel.
+
+| Layer | Kernel | Dispatch (grid, block) | PTX module SHA-256 | Module identity |
+|---|---|---|---|---|
+| enc1 | `rrlite_enc1_4x4` | 61,35,1; 32,1,2 | `f51bdc9e7b0e136865cc90ebdf1702614877a6cef65c387127038ac3e42e5a04` | 246ed4dd4573ee6d |
+| enc2 | `rrlite_enc2_4x4` | 31,18,1; 32,1,4 | `670204a0fc1d6789b3d1c65a57c90643bde7e44d37003a35e254c226c9e7ae92` | b4758c1bc25cb96a |
+| tube#1..#6 | `rrlite_enc3_tube_4x4` | 16,9,1 and 15,9,1; 32,1,4 | `222e99a1fb9f1ac69acf926a5821419cc8dbd2fa9e0e12ffab6f56b337c36e41` | c7b41e54ab68d071 |
+| dec2 | `rrlite_dec2_4x4` | 30,17,1; 32,1,4 | `8b86902e88367fab3c7da4fe762ec58d18bc24a459610e3ed212656bd0eb2f53` | b686d5b2f6d57a00 |
+| dec1 | `rrlite_dec1_4x4` | 60,34,1; 32,1,2 | `741500aa00bf59b5d707f94fe1ac53fdfc450cbf97cc47c8f6d724dd74e7e2f9` | 482e5a3398d76ec1 |
+
+[M] Two fresh enc2 runs are byte-identical across every captured file (PTX hash
+included), and the earlier enc1 pair is identical as well. Translated runs are also
+consistent across processes: the chained enc2 input equals the chained enc1 merge
+byte for byte, and the chained enc1 output and merge equal the single-layer translated
+enc1 capture. This is ZLUDA translation executed on AMD; it is not NVIDIA hardware
+behaviour and no NVIDIA-hardware parity is claimed.
+
+### 2. Mode A: each layer from identical input bytes
+
+[M] Each translated capture is exported into a Sette fixture (`m_layer_fixture.py
+export`, one replay directory accepted directly), so Sette, the pinned conservative
+and fast modules, and the translated PTX consume the same input and weight bytes; the
+contract script asserts this before comparing. Fields are e4m3 code stencils; RMS,
+maximum and bias are decoded values.
+
+| Layer | Sette vs translated | conservative vs translated | conservative vs Sette |
+|---|---|---|---|
+| enc1 output | 96.4183% / rms 0.01335 / max 0.50 / bias -0.000031 | 98.4912% / 0.00832 / 0.50 / +0.000016 | 96.9243% / 0.01240 / 0.50 / +0.000047 |
+| enc1 merge | 89.8379% / 0.02111 / 0.50 / +0.000304 | 94.3946% / 0.01462 / 0.50 / -0.000012 | 91.2875% / 0.01942 / 0.50 / -0.000316 |
+| enc2 output | 96.2217% / 0.00888 / 0.25 / +0.000006 | 96.9929% / 0.00954 / 0.50 / -0.000073 | 96.8904% / 0.00972 / 0.50 / -0.000079 |
+| enc2 merge | 90.0806% / 0.01566 / 0.50 / +0.000166 | 92.2784% / 0.01498 / 0.50 / -0.000111 | 91.1390% / 0.01616 / 0.50 / -0.000277 |
+| tube#1 | 97.5460% / 0.00879 / 1.00 / +0.000496 | 98.1885% / 0.00615 / 0.50 / +0.000027 | 96.3765% / 0.01028 / 1.00 / -0.000469 |
+| tube#2 | 95.9546% / 0.01177 / 1.00 / -0.000601 | 97.1611% / 0.00949 / 1.00 / -0.000355 | 97.1804% / 0.01001 / 1.00 / +0.000246 |
+| tube#3 | 98.7963% / 0.00410 / 0.50 / +0.000165 | 98.5659% / 0.00642 / 0.50 / -0.000044 | 97.7421% / 0.00731 / 0.50 / -0.000209 |
+| tube#4 | 96.7105% / 0.00944 / 1.00 / +0.000085 | 97.6565% / 0.00737 / 1.00 / +0.000126 | 97.2874% / 0.00847 / 1.00 / +0.000041 |
+| tube#5 | 95.0695% / 0.01182 / 1.00 / +0.000477 | 95.7411% / 0.01121 / 1.00 / +0.000349 | 96.6670% / 0.00972 / 1.00 / -0.000129 |
+| tube#6 | 95.7403% / 0.01556 / 0.75 / -0.000069 | 95.1269% / 0.01682 / 0.59 / -0.000173 | 94.5373% / 0.01844 / 0.75 / -0.000104 |
+| dec2 | 94.6417% / 0.01565 / 1.00 / -0.000034 | 94.5945% / 0.01588 / 1.00 / -0.000318 | 94.8529% / 0.01565 / 1.00 / -0.000284 |
+| dec1 | 96.0181% / 0.01399 / 1.06 / +0.000063 | 95.5735% / 0.01509 / 1.06 / +0.000090 | 95.3655% / 0.01547 / 1.00 / +0.000027 |
+
+[M] In every local comparison there are zero non-finite code pairs, zero saturated
+codes (`0x7e`/`0xfe`), and the signed bias stays below `6.1e-4` in all sixteen fields;
+Sette, fast and conservative are deterministic across repeats. Sette is not
+distinguishable from d4r's own native replacement by these measures: it is closer on
+tube#3, tube#6, dec2 and dec1 and farther on the rest, always inside the same band.
+
+Translation output-field SHA-256 (written regions only):
+enc1 `1d99c4d685458fe50e28b243b5058409ee0a458895e8edeb5e84b2382d29f728`,
+enc2 `9ed07168859727dd2d63413a0ff616f63d05e32a17be0c0fae61c4fe64a79158`,
+tube#1 `0419846eede7b3f1`, tube#2 `389cc88b5d9027af`, tube#3 `df7bda3f9a92ae0e`,
+tube#4 `fdebea21d28996fc`, tube#5 `383ff8de36cdc98a`, tube#6 `4b922f22d1ce0a69`
+(16-hex prefixes of the full digest in `summary.json`),
+dec2 `b583cdcf9eda65ab`, dec1 `38782c8dac8eac4b`.
+
+### 3. Unconfounded native-versus-translated controls
+
+[M] For enc1, enc2, tube#1, dec2 and dec1 the translated capture consumed exactly the
+canonical capture's input and weight bytes (all other modules stayed native in those
+runs). With identical operands, the original PTX translated by ZLUDA and d4r's own
+native replacement still differ:
+
+| Layer | canonical native vs translated | translated-vs-native differs |
+|---|---|---|
+| enc1 | 98.4912% output / 94.3946% merge | 126,075 / 175,642 codes |
+| enc2 | 96.9929% / 92.2784% | 94,226 / 80,651 codes |
+| tube#1 | 98.1885% | 18,921 codes |
+| dec2 | 94.5945% | 169,378 codes |
+| dec1 | 95.5731% | 369,903 codes |
+
+[M] The historical enc2, tube#1 and dec2 native output fields equal a fresh pinned
+conservative build of the same kernel byte for byte (0 differing codes), so those
+launches are confirmed conservative. enc1 was already identical this way. dec1's
+historical field differs from the fresh build in 33 of 8,355,840 codes, so it is
+conservative-equivalent but not byte-identical; that 33-code gap is the only
+difference between the "canonical" and "conservative" columns for dec1 (95.5731%
+versus 95.5735%).
+
+### 4. Mode B: the complete translated chain
+
+[M] A second capture removes all five network kernels from the native allowlist, so
+all ten neural launches dispatch `backend=translated` (enc1, enc2, six tube shifts,
+dec2, dec1), with the dec1 launch dumped. The pipeline is otherwise the real one:
+skip tensors, tube ping-pong, alternating shifts and padded geometry are the runtime's
+own resources, no intermediate is substituted.
+
+| Chain comparison (dec1 field, 8,355,840 codes) | exact | relative RMS | max | bias |
+|---|---:|---:|---:|---:|
+| translated chain vs canonical capture | 21.7096% | 0.12270 | 2.50 | -0.000125 |
+| Sette chain vs translated chain | 21.5728% | 0.12312 | 2.50 | +0.000281 |
+| Sette chain vs canonical capture | 21.3270% | 0.12555 | 3.25 | -0.000407 |
+
+[M] Chained agreement per boundary, all three implementations started from the same
+enc1 input bytes (translated chain dec1 SHA-256
+`dac25760612b5fe3bb59526b2a5b0d0fcd56d0a0eb1c94f29b2130e7cf427a4b`, canonical
+`5c22225b0039d80aef53c655d4965c111f65c3729362060a1bdf44e5b2522a78`):
+
+| Boundary | canonical vs translated | canonical vs Sette | translated vs Sette |
+|---|---:|---:|---:|
+| enc1 | 98.4912% | 96.9243% | 96.4183% |
+| enc2 | 44.6289% | 41.1305% | 40.3931% |
+| tube#1 | 36.6020% | 34.7653% | 35.2237% |
+| tube#2 | 28.4725% | 28.4242% | 28.9720% |
+| tube#3 | 25.9093% | 25.2088% | 24.9759% |
+| tube#4 | 25.7634% | 25.6434% | 26.1515% |
+| tube#5 | 26.6632% | 26.7856% | 26.9205% |
+| tube#6 | 13.9660% | 13.7847% | 14.0543% |
+| dec2 | 19.1203% | 18.5347% | 18.4737% |
+| dec1 | 21.7096% | 21.3270% | 21.5728% |
+
+### 5. Classification
+
+[M] The local residual is a boundary-requantization residual: ~1-5% of e4m3 codes,
+RMS 0.4-1.7%, no bias, no saturation, no non-finite values, maximum decoded deviation
+of about one or two quantization steps. It appears between d4r's own native kernel and
+the original PTX at the same magnitude (section 3), so it is **not** attributable to
+Sette's token/channel mapping, norms or weight operands, which the earlier traces
+already proved identical.
+
+[M] Chained agreement collapses in every pairing, including the two original
+implementations. enc2 already drops to ~40% because the enc1 merge (89.8% Sette vs
+translated) is re-quantized; by tube#6 all pairings sit near 14% and dec1 near 21%.
+The chained figure therefore measures sensitivity of the e4m3 requantization chain to
+individual code changes, not a defect that is specific to Sette.
+
+Classification of the observed differences: no reconstruction defect is demonstrated
+by these measurements; the enc1 K32 probe classified its single operation as permitted
+rounding (see the preceding addendum); ZLUDA lowering and AMD instruction-level
+differences remain possible contributors at operator scope and cannot be separated
+from each other or from NVIDIA-hardware rounding without NVIDIA hardware evidence;
+exact internal WMMA rounding stays unresolved.
+
+### 6. Gate implications (no threshold changed)
+
+- Legacy conservative-d4r gate: chained dec1 21.3270% (FAIL, as before).
+- Translated-PTX layer fidelity: 94.64-98.80% exact codes for Sette, 94.59-98.57% for
+  conservative d4r; every layer is deterministic and within one or two code steps.
+- Translated-PTX chain fidelity: 21.5728%, and the *translated reference itself*
+  reaches only 21.7096% against the canonical capture. A 99% chain floor is therefore
+  not a translated-reference fidelity criterion; it cannot be met by the original PTX
+  either, because the chain re-quantizes ten times and the two original paths already
+  disagree at layer scope.
+- The 99% floor, the legacy fixtures and the fast/conservative separation are
+  unchanged. Replacing or retiring the chain gate, or introducing a translated-reference
+  acceptance criterion, needs an explicit decision and its own validation; it was not
+  done here. B5 stays IN PROGRESS and `m_conformance.py --network` keeps failing.
+
+### 7. Reproduction
+
+Fresh, nonexistent local directories. Each capture writes proprietary PTX, weights and
+tensors only under `%TEMP%`.
+
+```powershell
+$T = "$env:LOCALAPPDATA\Temp\opencode"
+python scripts/m_capture_translated.py --kernel rrlite_enc2_4x4 --out "$T\enc2-translated-NEW"
+python scripts/m_capture_translated.py --kernel rrlite_enc3_tube_4x4 --limit 6 --out "$T\tube-translated-NEW"
+python scripts/m_capture_translated.py --kernel rrlite_dec2_4x4 --out "$T\dec2-translated-NEW"
+python scripts/m_capture_translated.py --kernel rrlite_dec1_4x4 --out "$T\dec1-translated-NEW"
+python scripts/m_translated_layer_suite.py --out "$T\translated-layers-NEW" --enc2 "$T\enc2-translated-NEW" --tube "$T\tube-translated-NEW" --dec2 "$T\dec2-translated-NEW" --dec1 "$T\dec1-translated-NEW"
+$ex = @('--exclude','rrlite_enc1_4x4','--exclude','rrlite_enc2_4x4','--exclude','rrlite_enc3_tube_4x4','--exclude','rrlite_dec2_4x4','--exclude','rrlite_dec1_4x4')
+python scripts/m_capture_translated.py --kernel rrlite_dec1_4x4 @ex --out "$T\chain-translated-NEW"
+python scripts/m_enc1_contract.py --out "$T\enc1-contract-NEW"
+python scripts/m_layer_suite.py chain "$T\m-capture-run\layers" --json "$T\chain-translated-NEW\sette-chain.json"
+python -m pytest tests -q
+python scripts/m_conformance.py --json "$T\chain-translated-NEW\b4.json"
+```
+
+Local experiment directories for this addendum: `enc1-translated-20261029`,
+`enc2-translated-20261029` (+`-repeat`), `tube-translated-20261029-b`,
+`dec2-translated-20261029`, `dec1-translated-20261029`,
+`translated-layers-20261029-b` (`summary.json` holds every comparison and hash),
+`chain-translated-*-20261029` (chained boundaries in `chained-boundaries.json`),
+`enc1-contract-translated-20261029`. No proprietary payload, PTX, code object, weight
+or capture is added to Git, and the pinned d4r submodule is unchanged.

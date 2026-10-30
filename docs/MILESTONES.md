@@ -324,6 +324,28 @@ Establish a deterministic reference execution path.
   are unchanged (21.3270% chained dec1, deterministic); B4 stays green and
   204 tests pass. Original-hardware/internal-WMMA semantics remain unresolved;
   see EXP-019's one-first-K32 addendum. B5 remains incomplete.
+  **Translated-PTX reference across all ten layers:** every network kernel
+  (`enc1`, `enc2`, the six tube shifts, `dec2`, `dec1`) has now been executed as
+  original PTX translated by ZLUDA, with the dispatch log proving
+  `backend=translated`, zero native dispatches, one hash-matched module per
+  kernel, and byte-identical repeat runs (details in EXP-019's ten-layer addendum).
+  From identical input/weight bytes, Sette reproduces 94.64-98.80% of the
+  translated e4m3 codes per layer (conservative d4r: 94.59-98.57%), with relative
+  RMS 0.41-1.57%, no bias, no saturation and no non-finite values. d4r's own
+  native replacement differs from the translated PTX by 1.5-5.4% per layer on
+  identical operands (enc1, enc2, tube#1, dec2, dec1), so the per-layer residual
+  is not Sette-specific. Run as a complete translated chain (all ten launches
+  translated, skip and tube resources preserved), the original PTX reproduces
+  only 21.7096% of the canonical chained dec1 field; Sette reaches 21.5728% of
+  that translated chain and 21.3270% of the canonical capture. The 99% chain
+  floor is therefore not a translated-reference criterion: it fails for the
+  original PTX too, because the ten-stage e4m3 requantization chain amplifies
+  layer-level code differences to near-random agreement (canonical-vs-translated
+  is 44.63% at enc2 and 13.97% at tube#6). No threshold, fixture, gate or
+  arithmetic was changed; the legacy conservative gate and the translated
+  fidelity measurements are reported separately and any gate replacement needs
+  an explicit, separately validated decision. B4 stays green at 99.9369%,
+  208 tests pass, and 21.3270% remains the failing legacy chain result.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 
