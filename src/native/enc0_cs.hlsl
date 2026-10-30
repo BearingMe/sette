@@ -252,6 +252,10 @@ float Column(uint n, float fv[128])
     return acc;
 }
 
+#ifndef ENC0_LOAD_COLUMN
+#define ENC0_LOAD_COLUMN Column
+#endif
+
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
@@ -285,7 +289,7 @@ void main(uint3 id : SV_DispatchThreadID)
     [unroll]
     for (uint c = 0u; c < 64u; ++c)
     {
-        float acc = Column(kColumn[c], fv);
+        float acc = ENC0_LOAD_COLUMN(kColumn[c], fv);
         acc = min(max(acc, -6.28125f), 6.28125f);       // max/min.f16x2, +-2*pi
         codes[c] = E4M3Code(acc);
     }

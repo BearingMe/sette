@@ -5,6 +5,13 @@
 **Foundation:** `6e4e6ea` commits M09-F; 321 tests passed before proceeding.
 No push. Windows/D3D12, RX 7700 XT / gfx1101, SDK DXC, RGA 2.15.
 
+**M09-H addendum:** M09-G was audited and committed as `c129558` without a push.
+[EXP-029](EXP-029-m09-complete-int8.md) subsequently closes enc0 and every dynamic
+attention product: **76/76 operators, 100% of the same dense MAC denominator**.
+The G batch metrics, failures and inventory rows below remain historical evidence;
+the inventory's `m09_h` overlay records the new status. This does not turn the
+G/H image-regression failures into quality passes.
+
 ## G1 — Complete matrix inventory and denominator
 
 [S] The machine-readable [complete inventory](EXP-028-matrix-inventory.json)

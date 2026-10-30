@@ -209,7 +209,10 @@ def audit_config(fixtures,batch):
             shader=next(w[1] for w in by_name[op['name']]['lines'] if w[0]=='shader')
             wanted='swin_mlp_down_q8.cso' if op['name'] in ('wo','mlp-down') else 'swin_mlp_up_q8.cso'
             if Path(shader).name!=wanted: raise ValueError('silent matrix fallback: '+label+'.'+op['name'])
-        if ['shader','swin_attention.cso'] not in by_name['attention']['lines']:
+        if r.get('int8_attention'):
+            import m09_complete as complete
+            complete.audit_attention(directory)
+        elif 'attention' not in by_name or ['shader','swin_attention.cso'] not in by_name['attention']['lines']:
             raise ValueError('dynamic attention contract changed unexpectedly')
         total+=len(expected)
     if total!={'qv':20,'output':30,'mlp':50,'spatial':54}[batch]:

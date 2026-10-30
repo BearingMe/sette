@@ -1,5 +1,21 @@
 {
-  "scope": "Preset M reset frame, final cumulative spatial batch; logical layer/family operators, not dispatches or physical weight tiles",
+  "scope": "Historical M09-G spatial-batch snapshot; logical layer/family operators, not dispatches or physical weight tiles. See m09_h for current execution status without rewriting this measured snapshot.",
+  "m09_h": {
+    "evidence": "EXP-029-m09-complete-int8.md",
+    "baseline_revision": "c129558",
+    "execution_status": "PASS, bounded reset-frame scope; not validated image quality",
+    "int8_operators": 76,
+    "int8_macs": 34518597632,
+    "macs": 34518597632,
+    "operation_coverage": 1.0,
+    "mac_coverage": 1.0,
+    "overrides": {
+      "enc0": "INT8 implemented and validated: GPU texture/dither feature adapter, existing quantizer/GEMM and original field epilogue",
+      "qkt": "INT8 implemented and validated in all ten layers: runtime Q row scales, transposed dynamic Q RHS; f32 rescale/bias then f16 scores",
+      "pv": "INT8 implemented and validated in all ten layers: runtime P row and window-local V column scales; f32 rescale then f16/E4M3 output"
+    },
+    "unchanged": "All previously true rows remain validated INT8; dimensions, instances, dense MAC denominator and non-GEMM exceptions unchanged. Floating-point softmax retained. No remaining designated FP16 matrix."
+  },
   "baseline_revision": "6e4e6ea",
   "columns": ["layer", "original_dispatch", "family", "M", "K", "N", "instances", "validated_int8"],
   "mac_formula": "M*K*N*instances; padded executed rows; one MAC, not two FLOPs",

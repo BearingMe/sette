@@ -113,6 +113,9 @@ def declared_outputs(stage_txt):
         if words and words[0] == 'dec0_int8':
             import m_stage_fixture as sf
             out.update(sf.DEC0_DIAGNOSTICS)
+        if words and words[0] == 'enc0_int8':
+            import m09_complete as complete
+            out.update(complete.ENC0_DIAGNOSTICS)
         if not words or words[0] != 'uav':
             continue
         if words[1] == 'buffer':
@@ -382,6 +385,8 @@ def input_manifest(a):
              'mlp_mode': getattr(a, 'mlp_mode', 'fp16'),
              'cumulative_mode': getattr(a, 'cumulative_mode', 'none'),
              'dec0_mode': getattr(a, 'dec0_mode', 'fp16'),
+             'enc0_mode': getattr(a, 'enc0_mode', 'fp16'),
+             'attention_mode': getattr(a, 'attention_mode', 'fp16'),
              'q_mode': getattr(a, 'q_mode', 'fp16'),
             'shaders': {p.name: sha(p) for p in sorted(a.shaders.glob('*.cso'))},
             'fixtures': fixtures, 'layers': layers,
@@ -511,6 +516,8 @@ def main():
     ap.add_argument('--enc1-int8', type=Path, default=None,
                     help='enc1 fixture containing the INT8 Q projection')
     ap.add_argument('--dec0-mode', choices=['fp16', 'int8-expansion'], default='fp16')
+    ap.add_argument('--enc0-mode', choices=['fp16', 'int8-embedding'], default='fp16')
+    ap.add_argument('--attention-mode', choices=['fp16', 'int8'], default='fp16')
     ap.add_argument('--mlp-mode', choices=['fp16', 'int8-up', 'int8-pair'], default='fp16')
     ap.add_argument('--enc1-mlp', type=Path, help='enc1 INT8-up-only fixture')
     ap.add_argument('--dec0-frame', type=Path, help='dec0-only raw RGBA16F control')
@@ -524,6 +531,8 @@ def main():
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.cumulative_mode == 'none' and a.cumulative_layers:
         ap.error('--cumulative-layers requires an explicit cumulative mode')
+    if a.attention_mode!='fp16' and a.cumulative_mode!='spatial':
+        ap.error('INT8 attention requires the cumulative spatial graph')
     if a.cumulative_mode != 'none':
         if any(m != 'fp16' for m in (a.q_mode, a.dec0_mode, a.mlp_mode)) or not a.cumulative_layers:
             ap.error('cumulative mode requires its own layer fixtures, not independent precision flags')
@@ -532,6 +541,8 @@ def main():
             record = json.loads((Path(suite.fixture(str(a.cumulative_layers), label)) / 'fixture.json').read_text())
             if record.get('int8_batch') != a.cumulative_mode:
                 ap.error('cumulative fixture batch does not match requested mode')
+            if bool(record.get('int8_attention')) != (a.attention_mode=='int8'):
+                ap.error('attention mode and actual layer graph disagree')
         import m09_cumulative as cumulative
         cumulative.audit_config(a.cumulative_layers, a.cumulative_mode)
         if a.cumulative_mode == 'spatial': a.dec0_mode = 'int8-expansion'
@@ -554,14 +565,21 @@ def main():
               'inputs': manifest, 'scripts': {'m_b6_frame.py': sha(__file__)},
               'q_mode': a.q_mode, 'enc1_int8': (str(a.enc1_int8) if a.enc1_int8 else None),
               'dec0_mode': a.dec0_mode,
+              'enc0_mode': a.enc0_mode,
+              'attention_mode': a.attention_mode,
               'mlp_mode': a.mlp_mode,
               'cumulative_mode': a.cumulative_mode,
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
               'boundaries': {}, 'missing_outputs': []}
 
     def pipeline(tag):
-        enc0 = run(a.probe, FIXTURES / 'enc0' / 'stage.txt', a.out / f'enc0-{tag}',
-                   a.shaders)
+        enc0_fixture=FIXTURES / 'enc0'
+        if a.enc0_mode!='fp16':
+            import m09_complete as complete
+            enc0_fixture=clone_fixture('enc0',a.out/f'enc0-fixture-{tag}')
+            complete.prepare_enc0(enc0_fixture)
+        enc0 = run(a.probe, enc0_fixture / 'stage.txt', a.out / f'enc0-{tag}',
+                   a.shaders, seed=(1 if tag=='repeat' else 0) if a.enc0_mode!='fp16' else None)
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
         build_chain(a.cumulative_layers or LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
@@ -572,7 +590,7 @@ def main():
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None)
-        full = {'enc0': {'fixture': FIXTURES / 'enc0', 'results': enc0},
+        full = {'enc0': {'fixture': enc0_fixture, 'results': enc0},
                 'chain': {'file': dec1}, **stages['stages']}
         hashes = boundary_hashes(full)
         if a.mlp_mode != 'fp16':

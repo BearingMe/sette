@@ -48,6 +48,8 @@ set(SHADERS
 # its own target so the FP16 and reconstruction shaders keep their SM 6.2
 # code generation (and their measured outputs) unchanged.
 set(SHADERS64
+    "swin_attention_q8_cs.hlsl|QK|swin_attention_qk.cso"
+    "swin_attention_q8_cs.hlsl|PV|swin_attention_pv.cso"
     "swin_mlp_down_q8_cs.hlsl|Down|swin_mlp_down_q8.cso"
     "swin_mlp_up_q8_cs.hlsl|Up|swin_mlp_up_q8.cso"
     "dec0_q8_layout_cs.hlsl|Quantize|dec0_q8_quant.cso"
@@ -61,6 +63,10 @@ set(SHADERS64
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
 # 16bit-types` provides (`(half)` from double is a single conversion).
 set(SHADERS16
+    "swin_attention_q8_cs.hlsl|Pack|swin_attention_pack.cso"
+    "swin_attention_q8_cs.hlsl|Softmax|swin_attention_softmax.cso"
+    "enc0_q8_cs.hlsl|Features|enc0_q8_features.cso"
+    "enc0_q8_epilogue_cs.hlsl|main|enc0_q8_epilogue.cso"
     "swin_cumulative_layout_cs.hlsl|Unpack|swin_cumulative_unpack.cso"
     "swin_cumulative_layout_cs.hlsl|GatherMerge|swin_cumulative_gather.cso"
     "swin_cumulative_layout_cs.hlsl|MergeStore|swin_cumulative_merge_store.cso"
@@ -105,6 +111,7 @@ foreach(entry IN LISTS SHADERS16)
         COMMAND "${DXC_EXECUTABLE}" -T cs_6_2 -E "${entrypoint}" -O3
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
         DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/swin_layer_cs.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/enc0_cs.hlsl"
         COMMENT "dxc ${source}:${entrypoint} -> ${output}")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()
@@ -122,6 +129,7 @@ foreach(entry IN LISTS SHADERS64)
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
         DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/swin_q8_common.hlsli"
                 "${CMAKE_CURRENT_SOURCE_DIR}/dec0_cs.hlsl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/swin_layer_cs.hlsl"
         COMMENT "dxc ${source}:${entrypoint} -> ${output} (cs_6_4)")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()

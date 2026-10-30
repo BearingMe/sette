@@ -64,6 +64,8 @@ void WriteFile(const fs::path& path, const void* data, size_t bytes) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("cannot write " + path.string());
     out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    out.flush();
+    if (!out) throw std::runtime_error("incomplete write: " + path.string());
 }
 
 uint32_t Align(uint64_t value) {
@@ -131,6 +133,7 @@ struct Fixture {
     std::vector<Binding> bindings;
     // Fixed dec0 prefix, not another graph language. Three offline weight files.
     std::vector<fs::path> dec0Weights;
+    std::vector<fs::path> enc0Weights;
     fs::path shaderDirectory;
 };
 
@@ -155,11 +158,11 @@ Fixture Parse(const fs::path& manifest, const fs::path& shaderDir) {
             f.shader = relative.is_absolute() ? relative : f.directory / relative;
             if (!fs::exists(f.shader) && !shaderDir.empty())
                 f.shader = shaderDir / relative;
-        } else if (key == "dec0_int8") {
+        } else if (key == "dec0_int8" || key == "enc0_int8") {
             for (int i = 0; i < 3; ++i) {
                 std::string name;
                 if (!(words >> name)) throw std::runtime_error("dec0_int8 requires codes scales bias");
-                f.dec0Weights.push_back(f.directory / name);
+                (key == "dec0_int8" ? f.dec0Weights : f.enc0Weights).push_back(f.directory / name);
             }
         } else if (key == "threads") {
             words >> f.threads[0] >> f.threads[1] >> f.threads[2];
@@ -269,6 +272,22 @@ public:
 
     void Run(Fixture& f, const fs::path& outputDir, int seed = -1) {
         const bool dec0Int8 = !f.dec0Weights.empty();
+        const bool enc0Int8 = !f.enc0Weights.empty();
+        if (enc0Int8) {
+            if (dec0Int8 || f.enc0Weights.size()!=3 || f.bindings.size()!=3 ||
+                f.params.size()!=24 || f.shader.filename()!="enc0_q8_epilogue.cso" ||
+                !f.bindings[0].input || f.bindings[0].kind!=Kind::Buffer || f.bindings[0].bytes!=12416 ||
+                !f.bindings[1].input || f.bindings[1].kind!=Kind::Texture ||
+                f.bindings[1].format!=DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                f.bindings[1].width!=960 || f.bindings[1].height!=540 ||
+                f.bindings[2].input || f.bindings[2].kind!=Kind::Buffer || f.bindings[2].bytes!=8355840)
+                throw std::runtime_error("enc0_int8: incompatible fixture");
+            const uint32_t* p=reinterpret_cast<const uint32_t*>(f.params.data());
+            if (p[0]!=960 || p[1]!=540 || p[2]!=960 || p[3]!=544 || p[4]>=8 || p[5]!=1)
+                throw std::runtime_error("enc0_int8: only bounded 960x544 reset contract supported");
+            Binding b; b.bytes=130560ull*64*2; b.file="out-embedding.bin";
+            f.bindings.push_back(b);
+        }
         if (dec0Int8) {
             if (f.dec0Weights.size() != 3 || f.bindings.size() != 6 ||
                 !f.bindings[0].input || !f.bindings[1].input ||
@@ -302,14 +321,14 @@ public:
             if (!b.input) {
                 resources[i] = b.kind == Kind::Texture
                                    ? CommittedTexture(b, D3D12_RESOURCE_STATE_COPY_DEST)
-                                   : CommittedBuffer(Align(b.bytes), D3D12_HEAP_TYPE_DEFAULT,
-                                                     D3D12_RESOURCE_STATE_COPY_DEST, true);
+                                    : CommittedBuffer(Align(b.bytes), D3D12_HEAP_TYPE_DEFAULT,
+                                                      D3D12_RESOURCE_STATE_COMMON, true);
                 readback[i] = b.kind == Kind::Texture
                                   ? TextureStaging(b, D3D12_HEAP_TYPE_READBACK,
                                                    D3D12_RESOURCE_STATE_COPY_DEST)
                                   : CommittedBuffer(Align(b.bytes), D3D12_HEAP_TYPE_READBACK,
                                                     D3D12_RESOURCE_STATE_COPY_DEST, false);
-            } else if (dec0Int8 && i == f.bindings.size() - 1) {
+            } else if ((dec0Int8 || enc0Int8) && i == f.bindings.size() - 1) {
                 resources[i] = CommittedBuffer(b.bytes, D3D12_HEAP_TYPE_DEFAULT,
                                                 D3D12_RESOURCE_STATE_COMMON, true);
             } else if (b.kind == Kind::Texture) {
@@ -321,6 +340,9 @@ public:
 
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), pipeline.Get()), "Reset(list)");
+        for (size_t i=0;i<f.bindings.size();++i)
+            if (!f.bindings[i].input && f.bindings[i].kind==Kind::Buffer)
+                Transition(resources[i].resource.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
 
         // Seed every surface via its actual copy footprint, so repeat runs can
         // distinguish complete writes from untouched, uninitialised GPU memory.
@@ -354,6 +376,7 @@ public:
         }
         Prefix prefix;
         if (dec0Int8) prefix = Dec0Prefix(f, resources, params);
+        if (enc0Int8) prefix = Enc0Prefix(f, resources, params, seed);
 
         D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -451,6 +474,17 @@ public:
                 list_->CopyBufferRegion(prefix.readback.back().resource.Get(), 0, source->resource.Get(), 0, prefix.bytes[i]);
             }
         }
+        if (enc0Int8) {
+            for (size_t i=0;i<prefix.outputs.size();++i) {
+                auto* source=prefix.outputs[i];
+                Transition(source->resource.Get(), i==0 || i==1 || i==2 || i==5
+                    ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+                prefix.readback.push_back(CommittedBuffer(prefix.bytes[i], D3D12_HEAP_TYPE_READBACK,
+                    D3D12_RESOURCE_STATE_COPY_DEST,false));
+                list_->CopyBufferRegion(prefix.readback.back().resource.Get(),0,source->resource.Get(),0,prefix.bytes[i]);
+            }
+        }
         Check(list_->Close(), "Close(list)");
 
         ID3D12CommandList* lists[] = {list_.Get()};
@@ -476,6 +510,15 @@ public:
             std::printf("D3D12 debug: zero error/corruption messages (%llu total)\n", count);
         }
         fs::create_directories(outputDir);
+        if (enc0Int8) {
+            const char* names[]={"out-features.bin","out-q8a.bin","out-q8as.bin","out-acc.bin","out-float.bin","out-embedding.bin"};
+            for (size_t i=0;i<prefix.readback.size();++i) {
+                void* data=nullptr;
+                Check(prefix.readback[i].resource->Map(0,nullptr,&data),"Map(enc0 diagnostics)");
+                WriteFile(outputDir/names[i],data,prefix.bytes[i]);
+                prefix.readback[i].resource->Unmap(0,nullptr);
+            }
+        }
         if (dec0Int8) {
             const char* names[] = {"out-q8a.bin", "out-q8as.bin", "out-acc.bin", "out-float.bin", "out-expansion.bin"};
             for (size_t i = 0; i < prefix.readback.size(); ++i) {
@@ -502,6 +545,7 @@ public:
 private:
     struct Prefix {
         std::vector<GpuBuffer> buffers, readback;
+        std::vector<GpuBuffer> sentinels;
         std::vector<GpuBuffer*> outputs;
         std::vector<uint64_t> bytes;
         std::vector<ComPtr<ID3D12DescriptorHeap>> heaps;
@@ -516,6 +560,79 @@ private:
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = before; b.Transition.StateAfter = after;
         list_->ResourceBarrier(1, &b);
+    }
+
+    Prefix Enc0Prefix(const Fixture& f, std::vector<GpuBuffer>& external, const GpuBuffer& params, int seed) {
+        Prefix p;
+        p.buffers.reserve(11);
+        const uint64_t sizes[]={33423360,16711680,522240,33423360,33423360,16};
+        for (auto bytes:sizes) {
+            p.buffers.push_back(CommittedBuffer(bytes,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_COMMON,true));
+            auto& b=p.buffers.back();
+            if (seed>=0) {
+                p.sentinels.push_back(Upload(bytes,nullptr));
+                auto& s=p.sentinels.back();
+                auto* data=static_cast<uint8_t*>(s.mapped);
+                for (uint64_t j=0;j<bytes;++j) data[j]=uint8_t((j*73+(j>>8)*19+seed*151+37)&255);
+                Transition(b.resource.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_DEST);
+                list_->CopyBufferRegion(b.resource.Get(),0,s.resource.Get(),0,bytes);
+                Transition(b.resource.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            } else Transition(b.resource.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+        Transition(external.back().resource.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const uint64_t weightBytes[]={8192,256,256};
+        for (size_t i=0;i<3;++i) {
+            auto data=ReadFile(f.enc0Weights[i]);
+            if (data.size()!=weightBytes[i]) throw std::runtime_error("enc0 INT8 weight size mismatch");
+            p.buffers.push_back(Upload(data.size(),data.data()));
+        }
+        const uint32_t shape[]={130560,128,64,0};
+        p.buffers.push_back(Upload(sizeof(shape),shape));
+        auto dispatch=[&](const char* shader,const GpuBuffer& cb,std::vector<GpuBuffer*> srvs,
+                          std::vector<GpuBuffer*> uavs,UINT groups,bool texture) {
+            p.signatures.push_back(MakeRootSignature(UINT(srvs.size()),UINT(uavs.size())));
+            p.pipelines.push_back(MakePipeline(p.signatures.back().Get(),f.shaderDirectory/shader));
+            D3D12_DESCRIPTOR_HEAP_DESC desc{};
+            desc.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            desc.NumDescriptors=UINT(srvs.size()+uavs.size());desc.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            ComPtr<ID3D12DescriptorHeap> heap;
+            Check(device_->CreateDescriptorHeap(&desc,IID_PPV_ARGS(&heap)),"CreateDescriptorHeap(enc0)");
+            auto cpu=heap->GetCPUDescriptorHandleForHeapStart();auto gpu=heap->GetGPUDescriptorHandleForHeapStart();
+            UINT stride=device_->GetDescriptorHandleIncrementSize(desc.Type);
+            for (size_t i=0;i<srvs.size()+uavs.size();++i) {
+                D3D12_CPU_DESCRIPTOR_HANDLE at{cpu.ptr+i*stride};
+                if (i<srvs.size()) {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC v{};v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    if (texture && i==1) {
+                        v.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;v.Texture2D.MipLevels=1;
+                    } else {
+                        v.Format=DXGI_FORMAT_R32_UINT;v.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;v.Buffer.NumElements=UINT(srvs[i]->size/4);
+                    }
+                    device_->CreateShaderResourceView(srvs[i]->resource.Get(),&v,at);
+                } else {
+                    auto* b=uavs[i-srvs.size()];D3D12_UNORDERED_ACCESS_VIEW_DESC v{};
+                    v.Format=DXGI_FORMAT_R32_UINT;v.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;v.Buffer.NumElements=UINT(b->size/4);
+                    device_->CreateUnorderedAccessView(b->resource.Get(),nullptr,&v,at);
+                }
+            }
+            ID3D12DescriptorHeap* heaps[]={heap.Get()};list_->SetDescriptorHeaps(1,heaps);
+            list_->SetPipelineState(p.pipelines.back().Get());list_->SetComputeRootSignature(p.signatures.back().Get());
+            list_->SetComputeRootConstantBufferView(0,cb.address);list_->SetComputeRootDescriptorTable(1,gpu);
+            list_->SetComputeRootDescriptorTable(2,D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr+srvs.size()*stride});
+            list_->Dispatch(groups,1,1);p.heaps.push_back(heap);
+            std::printf("enc0 prefix %s: dispatch %ux1x1\n",shader,groups);
+        };
+        auto& b=p.buffers;
+        dispatch("enc0_q8_features.cso",params,{&external[0],&external[1]},{&b[0]},2040,true);
+        Transition(b[0].resource.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        dispatch("swin_q8_quant.cso",b[9],{&b[0]},{&b[1],&b[2]},2040,false);
+        for (size_t i:{1u,2u}) Transition(b[i].resource.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        dispatch("swin_mlp_up_q8.cso",b[9],{&b[1],&b[6],&b[2],&b[7],&b[8]},
+                 {&external.back(),&b[3],&b[4]},8160,false);
+        Transition(external.back().resource.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        p.outputs={&b[0],&b[1],&b[2],&b[3],&b[4],&external.back()};
+        p.bytes={33423360,16711680,522240,33423360,33423360,16711680};
+        return p;
     }
 
     Prefix Dec0Prefix(const Fixture& f, std::vector<GpuBuffer>& external, const GpuBuffer& params) {
