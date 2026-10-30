@@ -1242,7 +1242,7 @@ merge re-quantizes the same `x2b` with `q8` (`swin_layer_cs.hlsl` Store/Merge,
 `swin_tok.h:1030,1061`), so the layer's output field *is* the merge's input code
 image. [M] For enc1's captured geometry the padded ring the shift removes is exactly
 the part the field does not hold: with `W,H = 480,272`, `sx,sy = 2,2`, the padded grid
-is `488x280`, and every stored merged token reads tokens at `x <= 481`, `y <= 273` —
+is `488x280`, and every stored merged token reads tokens at `x <= 481`, `y <= 273` ï¿½
 inside the field. The probe rejects any geometry where that fails.
 
 ### 2. Method
@@ -1257,7 +1257,7 @@ reference), so the per-k32 rounding is measured rather than assumed.
 
 [M] The probe is not a separate arithmetic: applied to Sette's own output codes it
 reproduces Sette's merge field **100.0000%** (3,134,440 / 3,134,440 codes), so it
-reproduces the shader's path — ordering, permutation, weights, bias, groups, clamp,
+reproduces the shader's path ï¿½ ordering, permutation, weights, bias, groups, clamp,
 encoding and storage included.
 
 ### 3. Results: same operands, four paths
@@ -1327,6 +1327,13 @@ propagation of many one-code differences rather than one fixable operator. A B6
 full-frame run built on that chain would therefore produce a frame that cannot yet be
 attributed to a validated neural oracle. B6 needs an explicit decision; it should not
 be started as a continuation of this investigation.
+
+**Addendum (2026-10-30): the decision was taken.** B6 was authorized as EXPLORATORY and
+executed under its own execution gate; the frame is 47.05 dB / windowed SSIM 0.999259
+with execution PASS and fidelity INCONCLUSIVE, and nothing about the above changes â€”
+the chained `dec1` is still 21.5728% against the translated chain
+([EXP-020](EXP-020-m05-native-frame.md)). This section's observation that such a frame
+cannot be attributed to a validated oracle is exactly how B6 is now reported.
 
 ### 7. Reproduction
 

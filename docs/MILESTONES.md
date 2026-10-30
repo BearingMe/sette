@@ -33,7 +33,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M06 | Operator-Level Reconstruction Probes | COMPLETE | PASS |
 | M07 | INT8 Quantization Feasibility | COMPLETE | PASS |
 | M08 | RDNA 3 Native INT8 Probes | COMPLETE | PASS |
-| M09 | INT8 Kernel Reconstruction | NOT STARTED | PENDING |
+| M09 | INT8 Kernel Reconstruction | IN PROGRESS | PENDING |
 | M10 | Complete Network Execution | NOT STARTED | PENDING |
 | M11 | Differential Error Mapping | NOT STARTED | PENDING |
 | M12 | Weight Quantization Refinement | NOT STARTED | PENDING |
@@ -42,7 +42,33 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase II: M06-M08 pass, M05 is capture-complete for buffers **and** images and its
+Phase II: M06-M08 pass. M05 is capture-complete for buffers **and** images and its
+reconstruction now executes end to end on the Windows/D3D12 path: `downsample` and
+`post` reproduce their captured outputs byte for byte
+([EXP-012](experiments/EXP-012-m05-native-downsample.md),
+[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)), `enc0` and `dec0` are
+reconstructed from their own PTX ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md),
+[EXP-015](experiments/EXP-015-m05-enc0-contract.md)), the ten layers run as one
+GPU-resident graph, and the complete frame is produced. The FP16 oracle is **not**
+validated: B5 passes eleven of its twelve declared fields and fails `enc1.merge`
+([EXP-019](experiments/EXP-019-m05-native-network.md)), B6 executes but its fidelity
+is INCONCLUSIVE ([EXP-020](experiments/EXP-020-m05-native-frame.md)), and the temporal
+path has not been implemented - B7 is not started and its prerequisites are audited in
+[EXP-022](experiments/EXP-022-m05-b7-readiness.md). Native INT8 wave-matrix and DP4A
+execution is verified on gfx1101 with matching ISA
+([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have
+contract tests with independent oracles
+([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured
+weight set is quantized to INT8 at five scopes
+([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408
+values, per-column 16-row K blocks best (0.0048 RMS). M09 has begun with one bounded
+native INT8 matrix operation whose ISA, integer product and quantisation error are all
+measured ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)). Phase I evidence: the
+Windows/D3D12/DXC toolchain and pinned quattro reference
+([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and
+numerical contract are in
+[`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md)
+and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
 reconstruction is now in progress: `downsample`, the last launch of the frame, executes
 natively and reproduces its captured surface byte for byte
 [EXP-012](experiments/EXP-012-m05-native-downsample.md)) and `dec0` reproduces all four of its
@@ -199,26 +225,36 @@ Understand the numerical behavior of the reference implementation.
 
 **Status:** IN PROGRESS / PENDING
 
-**Status:** The dependency that made this milestone `BLOCKED` is gone: capture coverage is
-complete at 1920x1080, including the textures and surfaces that `enc0`, `dec0`, `post` and
-`downsample` bind - 33 image targets with geometry, format, pitch and pre/post contents
-([EXP-011](experiments/EXP-011-m05-image-capture.md)) - and the remaining work is
-reconstruction, which is now underway. `downsample` is reconstructed natively and reproduces
-its captured surface byte for byte, together with the fixture infrastructure that executes a
-launch from its recorded formats, geometry, pitch, parameter block and dispatch
-([EXP-012](experiments/EXP-012-m05-native-downsample.md)), and `dec0` is reconstructed
-natively as well: its operand and weight mapping is derived from the kernel's own PTX, and all
-four surfaces are reproduced on the GPU with a measured residual
-([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)). `enc0` and `post` are reconstructed and byte-exact
+**Status:** Capture coverage is complete at 1920x1080 for both resource kinds - buffers
+([stage graph](../findings/2026-10-29-m05-stage-graph.md)) and 33 image targets with
+geometry, format, pitch and pre/post contents
+([EXP-011](experiments/EXP-011-m05-image-capture.md)) - and every stage of the frame now
+executes natively on Windows/D3D12: `downsample` and `post` reproduce their captured
+outputs byte for byte ([EXP-012](experiments/EXP-012-m05-native-downsample.md),
+[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)), `enc0` reproduces its token
+field byte for byte and `dec0` its four surfaces with an attributed residual
 ([EXP-015](experiments/EXP-015-m05-enc0-contract.md),
-[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)); the ten-layer native chain
-(C20) now executes and is deterministic but is not yet byte-faithful
-([EXP-019](experiments/EXP-019-m05-native-network.md)). C21, the full frame, is the next gate.
-`downsample`'s captured output array is byte-identical to the probe's
-independent D3D12 readback of the final frame, `dec0`'s four surfaces match `dec0_m.comp`
-and feed `post` byte for byte, and four temporal chains hold across 24 frame pairs. The
-graph, the 360 weight matrices and the whole token chain were already confirmed (14
-launches, 14/14 buffer edges).
+[EXP-014](experiments/EXP-014-m05-dec0-mapping.md)), and the ten layers run as one
+GPU-resident graph ([EXP-019](experiments/EXP-019-m05-native-network.md)). The complete
+1920x1080 frame has been produced ([EXP-020](experiments/EXP-020-m05-native-frame.md)).
+
+What is **not** established is the oracle itself. The milestone's objective is a
+deterministic reference, and the reference's own numerical contract is still contested:
+under the rescoped translated-PTX gate B5 passes eleven of its twelve declared fields and
+the chained criterion and fails `enc1.merge` (89.8379% exact, RMS 0.02111 against 90% and
+0.02), and the merge was separately proven correct on its own operands, so the residual is
+upstream rounding rather than a mapping defect. B6 executes correctly but its fidelity is
+INCONCLUSIVE: there is one captured content, the reference uses d4r's native layer
+replacements, and no independent static validation set exists. B7 (temporal) is not
+started; [EXP-022](experiments/EXP-022-m05-b7-readiness.md) audits what the existing
+multi-frame capture does and does not contain.
+
+Checkpoints C01 and C11 are therefore **not** marked complete. The Windows-native path
+supersedes their *purpose* (a deterministic reference execution path, validated against
+the captured reference) but not their *text*: d4r's standalone engine was never executed
+here (C01), and the `compile_m.py` full-FP16-oracle route is still unbuilt and, as far as
+this project has established, not executable on Windows (C11). An alternative path that
+reaches a similar place is not the same checkpoint.
 
 ### Objective
 
@@ -226,7 +262,10 @@ Establish a deterministic reference execution path.
 
 ### Checkpoints
 
-- [ ] C01: Build or execute d4r's relevant standalone engine.
+- [ ] C01: Build or execute d4r's relevant standalone engine. **Not done, and not on
+  the adopted path:** d4r's frame oracle is a Linux/Vulkan build. The reference was
+  established instead by capturing d4r's launches on Windows and replaying them
+  natively (B1-B6). The checkpoint's purpose is met; its stated action is not.
 - [x] C02: Pin the model and source revision (d4r `05e19d4`; Windows capture tooling `7da2f9a`; local DLL 310.7.0).
 - [x] C03: Establish one fixed output resolution and quality setting supported by the reference path (1920x1080 output, quality mode, preset 13; `output-0.rgba16f` captured at that geometry).
 - [x] C04: Prepare deterministic inputs (captured layer inputs; fixed 256x144 probe frame).
@@ -236,7 +275,17 @@ Establish a deterministic reference execution path.
 - [x] C08: Identify nondeterministic behavior, if any (none observed at layer scope).
 - [x] C09: Capture coverage audit: map the M dispatches against the ZLUDA whitelist and classify the missing groups by weights versus tensors ([finding](../findings/2026-10-29-m05-capture-coverage.md)).
 - [x] C10: Extend the Windows capture path for `enc0` and `dec0` weights first, then post/downsample tensors. Done by rebuilding ZLUDA with the four whitelist groups; every stage group now dumps in one frame at 1920x1080 and the `enc0`/`dec0` weight blobs decode with d4r's own layout code ([EXP-008](experiments/EXP-008-m05-full-capture.md)). The earlier probe-side MinHook attempt failed and is recorded in [EXP-004](experiments/EXP-004-m05-capture-hook-attempt.md).
-- [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full FP16 oracle, and compare against the captured NVIDIA reference while preserving the ten-layer regression. Two dependencies are open: `compile_m.py` names the input stage `rrlite_enc0_4x4_mvlo_{hdr,ldr}_folded` and the synthetic probe produces the `mvhi` variant, and d4r's full-frame oracle (`test_frame_m.py`, `kvk`/`evk`) is a Linux/Vulkan build, so no oracle execution path exists on Windows yet.
+- [ ] C11: Full-network validation: compile the model with `compile_m.py`, execute the full
+  FP16 oracle, and compare against the captured NVIDIA reference while preserving the
+  ten-layer regression. **Partly superseded, still genuinely open.** The comparison itself
+  now exists by another route: the complete native pipeline is compared against the captured
+  reference at layer scope under the translated-PTX contract (B5, FAIL on one field),
+  stage by stage (B4, PASS), and at full-frame scope (B6, execution PASS / fidelity
+  INCONCLUSIVE). What remains unfulfilled is the literal dependency chain: `compile_m.py`
+  names the input stage as `rrlite_enc0_4x4_mvlo_{hdr,ldr}_folded` while the synthetic probe
+  produces the `mvhi` variant, and d4r's full-frame oracle (`test_frame_m.py`, `kvk`/`evk`)
+  is a Linux/Vulkan build, so that oracle has never been executed here. The checkpoint stays
+  open because the *reference's* fidelity is what B5/B6 leave undecided.
 
 ### Extension checkpoints: Windows-native oracle (task C16-C22)
 
@@ -380,27 +429,56 @@ Establish a deterministic reference execution path.
   criterion, thresholds and fixtures are untouched and `enc1.merge` still fails at
   89.8379% / RMS 0.02111. B5 stays IN PROGRESS / FAIL, now with the residual attributed
   to upstream layer rounding rather than to any named operator. 226 tests pass,
-  including four new merge-contract tests. A B6 full-frame run would inherit the
-  unvalidated chained dec1 (21.5728% against the translated chain) and needs an
-  explicit decision rather than being started as a continuation.
-- [ ] B6 (C21): Full-frame oracle - **EXPLORATORY, no criteria yet.** The complete
-  native pipeline (`enc0` -> ten native layers -> `dec0` -> `post` -> `downsample`)
-  now produces a 1920x1080 frame on gfx1101 with no captured tensor substituted
-  between neural stages
-  ([EXP-020](experiments/EXP-020-m05-native-frame.md)). Measured against the canonical
-  capture: 47.05 dB PSNR (peak 1.0), 0.99794 SSIM, mean absolute error 0.001086,
-  maximum 0.178, zero NaN/Inf, zero saturation, and two complete runs are
-  byte-identical. Feeding the image stages the captured `dec1` instead gives 46.73 dB
-  and the translated-PTX chain gives 47.08 dB, so the chained neural difference
-  (46.59 dB versus the captured-dec1 path) is the same order as the image-stage
-  difference and neither dominates. No region collapses and the error is spread with a
-  mild border bias, so the existing differences do not indicate a substantial
-  reconstruction defect. This is **not** a validated oracle: B5 is still
-  IN PROGRESS / FAIL, B6 has no acceptance criteria, the frame is single static frame
-  with captured history/motion/colour inputs, and it must not be reported as an FP16
-  oracle result. Viewable reference/reconstruction/difference PNGs are exported
-  locally; nothing proprietary is tracked.
-- [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
+  including four new merge-contract tests.
+  **B5 status is unchanged and is not reopened (2026-10-30).** `enc1.merge` remains
+  89.8379% / RMS 0.02111 against 90% / 0.02; no threshold was relaxed, no field was
+  exempted, no rounding was changed, and no NVIDIA-hardware parity is claimed. B6 was
+  allowed to proceed independently under an explicitly experimental scope - B6's own
+  execution gate does not gate on B5 and B5 does not gate on B6's image - so the full
+  FP16 oracle stays qualified by this failure even though the frame is coherent.
+- [ ] B6 (C21): Full-frame oracle - **EXECUTORY: execution PASS, fidelity
+  INCONCLUSIVE.** The complete native pipeline (`enc0` -> ten native layers -> `dec0` ->
+  `post` -> `downsample`) produces a 1920x1080 frame on gfx1101 with no captured tensor
+  substituted between neural stages ([EXP-020](experiments/EXP-020-m05-native-frame.md)).
+  `scripts/m_b6_frame.py` now declares its contract in code and separates three things:
+  execution (all five stages, every declared output at its manifest-declared byte size,
+  RGBA16F 1920x1080, zero non-finite, zero saturation, a fresh two-run byte-identical
+  repeat across **all ten** stage boundaries, and a recorded hash per boundary), regression
+  (declared floors of 45 dB / 0.99 windowed SSIM / mean abs 0.005 / max abs 0.5 on both the
+  native frame and the image-stage control, plus a 42 dB floor on the chain's own
+  contribution), and fidelity (INCONCLUSIVE without an independent validation set). It
+  fails closed on missing outputs, mis-sized outputs, non-finite samples, unexpected
+  saturation, a reused-but-unverified output set, and cannot report PASS for a run that
+  did not re-execute.
+  Measured against the canonical capture: 47.05 dB PSNR (peak 1.0), windowed SSIM
+  0.999259 (the earlier 0.99794 was a labelled non-overlapping 8x8 block metric), mean
+  absolute error 0.001086, 0.24% mean relative error, maximum 0.178; alpha bit-identical
+  everywhere; zero NaN/Inf and zero saturation on every path. Feeding the image stages the
+  captured `dec1` gives 46.73 dB and the translated-PTX chain 47.08 dB, so the chained
+  neural contribution (46.59 dB against the captured-dec1 path) is the same order as the
+  image-stage error and neither dominates. Error is spread (median 16x16 block 0.00077,
+  worst 0.00290) with the interior slightly worse than the border, so no region collapses
+  and nothing indicates a reconstruction defect.
+  This is **not** a validated oracle: B5 is still IN PROGRESS / FAIL, there is one captured
+  content and no independent static validation set, the reference uses d4r's native layer
+  replacements, and the frame is the LDR/reset variant with captured colour and zero motion
+  only. Viewable reference/reconstruction/difference RGBA PNGs are exported locally; no
+  proprietary data is tracked.
+- [ ] B7 (C22): Temporal validation - **NOT STARTED, prerequisites audited.** The
+  multi-frame image capture does contain temporal resources, and
+  [EXP-022](experiments/EXP-022-m05-b7-readiness.md) measures exactly what it contains:
+  `post` history in/out at 2880x1620 (37,324,800 B, double-buffered across replays),
+  `dec0`'s SNORM8 recurrent feature in/out at 960x540, and `enc0`'s previous-motion input
+  with its three motion outputs (all zero). One nonzero producer->consumer handoff is
+  bit-exact in **two independent stages** (`post` history out replay 3 = history in replay
+  2; `dec0` feature out 3 = feature in 2), so the temporal data is real and recoverable.
+  What is missing is the bookkeeping: no capture records the frame index, the `reset` flag
+  or which surface the next launch binds, so no two-frame chain can be labelled with
+  confidence; `post` implements only the reset path (its fixture validator rejects
+  `reset != 0`), `dec0`'s recurrent branch is unimplemented, and the motion texture's
+  extent (960x540 bound vs 1920x1080 sampled) is unresolved because every captured motion
+  value is zero. First missing dependency: per-launch frame/reset bookkeeping. The plan is
+  in EXP-022 §5; no temporal execution is claimed.
 
 ### Validation Gate
 
@@ -408,24 +486,21 @@ Reference execution is reproducible, and captured outputs are suitable for diffe
 
 **Layer scope: PASS** — 10/10 captured layers replay byte-exactly and repeat byte-exactly against the captured NVIDIA outputs ([EXP-003](experiments/EXP-003-m05-layer-capture.md)).
 
-**Full-network gate: PENDING** - capture coverage is complete for both resource kinds:
-buffers ([stage graph](findings/2026-10-29-m05-stage-graph.md)) and images
-([EXP-011](experiments/EXP-011-m05-image-capture.md)), with two independent oracles agreeing
-with the captured images. The Windows-native reconstruction is in progress: one matrix stage
-reproduces the published accumulator contract ([EXP-010](experiments/EXP-010-m05-native-fp16-stage.md))
-and `downsample` now reproduces its captured surface byte for byte, with the fixture path
-that executes a captured launch natively ([EXP-012](experiments/EXP-012-m05-native-downsample.md)).
-What remains is the ten-layer network under the translated-PTX contract (B5: the
-rescoped gate passes eleven of twelve declared fields and the chained criterion, and
-fails only enc1 merge at 89.8379% against a 90% floor,
-[EXP-019](experiments/EXP-019-m05-native-network.md)), the full frame (B6: the pipeline
-now produces a complete 1920x1080 frame at 47.05 dB / 0.99794 SSIM, but as an
-EXPLORATORY result without criteria,
-[EXP-020](experiments/EXP-020-m05-native-frame.md)) and
-temporal validation (B7, now possible: four temporal chains hold over 24 frame pairs). `dec0`'s four surfaces are reproduced with a measured, attributed residual -
-gates 99.9991%, mix 99.9348%, feature 99.9787%, covariance 99.9883% of f16 values identical
-([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)) - and its operand mapping is now derived
-from the kernel's PTX. C11 is open; see [EXP-002](experiments/EXP-002-m05-oracle-blocker.md).
+**Full-network gate: PENDING / FAIL at layer scope.** Capture coverage is complete for
+both resource kinds ([EXP-011](experiments/EXP-011-m05-image-capture.md)), and every stage
+executes natively: `downsample` and `post` byte-exactly
+([EXP-012](experiments/EXP-012-m05-native-downsample.md),
+[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)), `dec0` at 99.9991% / 99.9348% /
+99.9787% / 99.9883% of f16 values with its residual attributed to E4M3 boundary flips
+([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)), `enc0` byte-exactly
+([EXP-015](experiments/EXP-015-m05-enc0-contract.md)), B4 green at 99.9369% of the final
+frame at max 7 ULP ([EXP-018](experiments/EXP-018-m05-regression-gate.md)). The gate is
+PENDING because the network-level contract is not met: B5 fails `enc1.merge` under its
+translated-PTX criteria ([EXP-019](experiments/EXP-019-m05-native-network.md)), B6 executes
+but its fidelity is INCONCLUSIVE ([EXP-020](experiments/EXP-020-m05-native-frame.md)), and
+B7 is not started ([EXP-022](experiments/EXP-022-m05-b7-readiness.md)). C11 remains open:
+the literal `compile_m.py` full-FP16-oracle route has never been executed here
+([EXP-002](experiments/EXP-002-m05-oracle-blocker.md)).
 
 ### Expected Deliverables
 
@@ -558,24 +633,48 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 
 ## M09 — INT8 Kernel Reconstruction
 
+**Status:** IN PROGRESS / PENDING — one bounded operator experiment passes; the
+representative-layer gate does not.
+
 ### Objective
 
 Implement the neural matrix operations required by Preset M.
 
 ### Checkpoints
 
-- [ ] C01: Implement INT8 matrix kernels.
-- [ ] C02: Support required tensor layouts.
-- [ ] C03: Implement quantization/dequantization boundaries.
+- [ ] C01: Implement INT8 matrix kernels. **Partial:** one native INT8 GEMM
+  (`src/native/gemm_int8_cs.hlsl`, `dot4add_i8packed`, `cs_6_4`) covers a single matrix
+  shape; attention, MLP, merge/expand layouts and fusion are not implemented.
+- [ ] C02: Support required tensor layouts. **Partial:** the case format supplies
+  row-major activations and per-column K-major weights; the captured plane-major token
+  field is converted outside the kernel.
+- [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric INT8
+  with per-output-column weight scales and per-row activation scales is implemented and
+  measured; per-K-block scales, clipping and asymmetric encodings are not.
 - [ ] C04: Support necessary floating-point operations and document each exception.
+  **Partial:** the f32 epilogue (two multiplies and a bias add) is the only floating-point
+  step in the kernel and is documented.
 - [ ] C05: Validate representative layers.
-- [ ] C06: Compare outputs against CPU INT8 references.
-- [ ] C07: Inspect generated GPU ISA.
-- [ ] C08: Measure numerical error before optimization.
+- [x] C06: Compare outputs against CPU INT8 references — the GPU product equals an
+  independent CPU INT8 reference to `9.60e-7` (f32 epilogue only) on the captured `dec0`
+  expansion matrix ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
+- [x] C07: Inspect generated GPU ISA — `v_dot4_i32_i8` confirmed for gfx1101 with RGA
+  2.15 on the same `.cso` that executes ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
+- [x] C08: Measure numerical error before optimization — INT8 vs the FP16 operator on
+  identical operands is 0.009915 relative, equal to the quantisation-only bound 0.009914
+  (weight side 0.005784, activation side 0.007395)
+  ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
 
 ### Validation Gate
 
-Representative reconstructed layers execute correctly on gfx1101 against independent CPU INT8 references, and generated ISA confirms the intended native matrix arithmetic.
+Representative reconstructed layers execute correctly on gfx1101 against independent CPU
+INT8 references, and generated ISA confirms the intended native matrix arithmetic.
+
+**PENDING.** The gate is met for one matrix operation, not for representative layers:
+C01-C04 are partial and C05 is open. The next bounded step is a matrix whose operand is
+already in the network's plane-major layout (`enc1`'s Q projection), then one dispatch
+replaced inside the chain graph with the stage output difference measured against the FP16
+stage. INT8 correctness, not image quality or speed, remains the priority.
 
 ### Expected Deliverables
 
