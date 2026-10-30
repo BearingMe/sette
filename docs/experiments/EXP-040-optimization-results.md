@@ -48,6 +48,7 @@ words. The change is a parallelization, not a different arithmetic contract.
 | Full FP16 frame SHA-256 | `dc97c4cb…d6e95b` — unchanged |
 | enc0 all-element CPU check | **13/13 PASS** (features, codes, scales, INT32, f32, f16, field, scalar probes, deterministic writes, zero debug) |
 | Attention pair all-element check | **23/23 PASS** (Q/V/P codes and scales, QK, PV, outputs, bounds, zero debug) |
+| M09 complete-network finalizer | **17/17 checks PASS** on the optimized build, using the new frame and the historical chain/ISA evidence |
 | Regression tests | **365 passed** |
 | Native matrix shaders | unchanged; `dot4` coverage and hashes untouched |
 

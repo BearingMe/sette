@@ -358,7 +358,9 @@ from `316fcf87…e25c52` to `242aaa95…d79229`.
 [M] The full INT8 frame remains **`f76ac032…4d6c00`**, the FP16 frame remains
 `dc97c4cb…d6e95b`, the enc0 all-element CPU check passes 13/13, and the
 representative attention pair passes 23/23 checks. The optimization is therefore
-arithmetic-neutral for the executed graph. The host hashes in the tables above
+arithmetic-neutral for the executed graph. The complete M09 finalizer also passes
+**17/17** on the optimized build, using the new frame and the historical
+chain/ISA evidence. The host hashes in the tables above
 (`1419ec59…`, `1e5f47ad…`) also describe the pre-instrumentation build; the M12
 timed binaries are separate targets, and the accepted hosts were rebuilt from the
 same sources for the optimization. See EXP-040 for the measured effect.

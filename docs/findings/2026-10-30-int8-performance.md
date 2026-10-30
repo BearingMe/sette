@@ -32,6 +32,9 @@ not bought with a numerical change.
 * [M] **Quality unchanged:** INT8 44.1393 dB vs the canonical reference,
   44.4875 dB vs FP16; the 45 dB gate still **FAILS**. Performance does not
   change the quality verdict.
+* [M] **M09 invariants:** the complete-network finalizer passes **17/17** on the
+  optimized build (frame, chain, ISA, fallback, handoff and debug checks), so the
+  performance change did not weaken the execution gate.
 * [M] **Memory:** the INT8 chain declares 680 GPU buffers / 4.39 GB total,
   largest 139.9 MB; peak resident VRAM was **not measured**.
 * [H] The quantizers and adapters are latency/occupancy-bound, not
