@@ -158,18 +158,27 @@ def _parse_graph(path):
     return resources, stages, dumps
 
 
-def build_chain(directory, out):
+def build_chain(directory, out, q_int8=False, enc1_int8=None):
     """Concatenate the ten layer graphs, remapping every produced field.
 
     A resource `<layer>_<name>` is local to that layer, except the fields named
     in `CHAIN_EDGES`: the consumer reads the producer's resource directly, so no
     intermediate leaves the GPU.
+
+    `q_int8` (M09 I4) takes enc1's graph from `enc1_int8` instead of
+    `directory/enc1`, and changes nothing else: the fixture it points at already
+    contains exactly one replaced projection (EXP-023).
     """
     os.makedirs(out, exist_ok=True)
     resources, stages, dumps = [], [], []
     produced = {}
+    overrides = {}
+    if q_int8:
+        if not enc1_int8:
+            raise SystemExit('q_int8 needs the INT8 enc1 fixture directory (enc1_int8)')
+        overrides['enc1'] = enc1_int8
     for label, name in zip(LABELS, STAGE_NAMES):
-        path = fixture(directory, label)
+        path = overrides.get(label) or fixture(directory, label)
         local_dir = path
         layer_resources, layer_stages, _ = _parse_graph(os.path.join(path, 'graph.txt'))
         record = json.load(open(os.path.join(path, 'fixture.json')))
@@ -233,6 +242,13 @@ def build_chain(directory, out):
                     if words[0] == 'srv' and words[2] == f'{safe}_skip':
                         words[2] = produced[producer]
 
+    if q_int8:
+        # the replaced projection must be the only difference in the graph
+        replaced = [s['name'] for s in stages
+                    if s['name'].startswith('enc1.') and s['name'].endswith(('q-quant', 'q'))]
+        if replaced != ['enc1.q-quant', 'enc1.q']:
+            raise SystemExit(f'hybrid chain: unexpected enc1 stages {replaced}')
+
     final = produced['dec1.out']
     lines = ['version 1']
     for r in resources:
@@ -259,9 +275,9 @@ def build_chain(directory, out):
             'final': final, 'bytes': bytes_}
 
 
-def run_chain(directory, probe, shaders, json_out):
-    out = os.path.join(directory, 'chain')
-    info = build_chain(directory, out)
+def run_chain(directory, probe, shaders, json_out, q_int8=False, enc1_int8=None):
+    out = os.path.join(directory, 'chain-int8q' if q_int8 else 'chain')
+    info = build_chain(directory, out, q_int8=q_int8, enc1_int8=enc1_int8)
     results = os.path.join(out, 'results')
     lf.run(out, probe, shaders, 0, results)
     again = os.path.join(out, 'results-repeat')
@@ -317,6 +333,9 @@ def main():
                                                    'm_network_stage.exe'))
     h.add_argument('--shaders', default=os.path.join(REPO, 'build', 'native'))
     h.add_argument('--json', type=argparse.FileType('w'), default=None)
+    h.add_argument('--q-mode', choices=['fp16', 'int8-q'], default='fp16')
+    h.add_argument('--enc1-int8', default=None,
+                   help='enc1 fixture with the INT8 Q projection (int8-q mode)')
     a = ap.parse_args()
     if a.command == 'export':
         return export_all(a.capture, a.out)
@@ -324,6 +343,9 @@ def main():
         return run_all(a.directory, a.probe, a.shaders)
     if a.command == 'check':
         return check_all(a.directory, a.probe, a.shaders, a.json)
+    if a.q_mode == 'int8-q':
+        return run_chain(a.directory, a.probe, a.shaders, a.json,
+                         q_int8=True, enc1_int8=a.enc1_int8)
     return run_chain(a.directory, a.probe, a.shaders, a.json)
 
 

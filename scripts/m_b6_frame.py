@@ -122,10 +122,10 @@ def declared_outputs(stage_txt):
     return out
 
 
-def build_chain(layers, out, enc1_input):
+def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None):
     sys.path.insert(0, str(HERE))
     import m_layer_suite as suite
-    info = suite.build_chain(str(layers), str(out))
+    info = suite.build_chain(str(layers), str(out), q_int8=q_int8, enc1_int8=enc1_int8)
     graph = out / 'graph.txt'
     lines = graph.read_text().splitlines()
     replaced = False
@@ -476,6 +476,10 @@ def main():
                     help='skip the second full run used for determinism (cannot pass)')
     ap.add_argument('--reuse', action='store_true',
                     help='reuse stage outputs already present in --out (cannot pass)')
+    ap.add_argument('--q-mode', choices=['fp16', 'int8-q'], default='fp16',
+                    help='enc1 Q projection: the FP16 dispatch, or the INT8 pair')
+    ap.add_argument('--enc1-int8', type=Path, default=None,
+                    help='enc1 fixture containing the INT8 Q projection')
     a = ap.parse_args()
     FIXTURES, LAYERS = a.fixtures, a.layers
     for path in (a.probe, a.network_probe, a.shaders):
@@ -488,8 +492,11 @@ def main():
     a.out = a.out.resolve()
     a.out.mkdir(parents=True, exist_ok=a.reuse)
     manifest = input_manifest(a)
+    if a.q_mode == 'int8-q' and a.enc1_int8 is None:
+        raise SystemExit('--q-mode int8-q needs --enc1-int8')
     report = {'status': 'running', 'fixtures': str(FIXTURES), 'layers': str(LAYERS),
               'inputs': manifest, 'scripts': {'m_b6_frame.py': sha(__file__)},
+              'q_mode': a.q_mode, 'enc1_int8': (str(a.enc1_int8) if a.enc1_int8 else None),
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
               'boundaries': {}, 'missing_outputs': []}
 
@@ -498,7 +505,8 @@ def main():
                    a.shaders)
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
-        build_chain(LAYERS, chain_dir, tokens)
+        build_chain(LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
+                    enc1_int8=a.enc1_int8)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                          a.shaders)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders)
