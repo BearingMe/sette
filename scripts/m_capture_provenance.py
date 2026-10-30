@@ -18,13 +18,13 @@ def dispatches(text):
     return rows
 
 
-def verify_translated(text, kernel):
+def verify_translated(text, kernel, count=1):
     rows = [r for r in dispatches(text) if r['kernel'] == kernel]
-    if len(rows) != 1 or rows[0]['backend'] != 'translated':
-        raise ValueError('expected exactly one translated dispatch and no native dispatch')
+    if len(rows) != count or any(r['backend'] != 'translated' for r in rows):
+        raise ValueError(f'expected exactly {count} translated dispatch(es) and no native dispatch')
     if f'module_direct kernel="{kernel}"' in text:
         raise ValueError('native module_direct contradicts translated control')
-    return rows[0]
+    return rows[0] if count == 1 else rows
 
 
 def audit(text, captures):

@@ -231,7 +231,11 @@ def params_block(g, offsets, **kwargs):
 
 
 def export(capture, label, out, frame):
-    directory = layer_directory(capture, label, frame)
+    # A one-kernel capture (translated PTX) is already a replay directory.
+    if os.path.basename(os.path.normpath(capture)).startswith('replay-'):
+        directory = capture
+    else:
+        directory = layer_directory(capture, label, frame)
     name = 'enc3_tube' if label.startswith('tube') else label
     C, heads, NPM, CIN = mm.LAYERS[name]
     P, x, skip, ref, mref = lo.read_layer(directory, name)
