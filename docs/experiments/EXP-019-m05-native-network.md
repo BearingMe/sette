@@ -390,7 +390,7 @@ have **not** been achieved; B5 must not be closed.
 
 **Capture validation: PASS. Numerical B5 status: unchanged/incomplete.**
 
-[M] `scripts/m_capture_translated_enc1.py` creates a fresh private native-module
+[M] `scripts/m_capture_translated.py` creates a fresh private native-module
 directory, removes only `rrlite_enc1_4x4` from its allowlist, and omits that code
 object. All other native modules are copied unchanged. Neither the installed
 runtime nor the old captures/fixtures are modified. A new process uses that
@@ -440,7 +440,7 @@ These are hashes of the actual field ranges, not the entire arena. Local
 Reproduce into a **new, nonexistent** output directory:
 
 ```powershell
-python scripts/m_capture_translated_enc1.py --out NEW_LOCAL_DIRECTORY
+python scripts/m_capture_translated.py --out NEW_LOCAL_DIRECTORY
 ```
 
 The capture is under `capture/replay-000001-rrlite_enc1_4x4/`; its `args.bin`,
@@ -649,7 +649,7 @@ python scripts/m_enc1_contract.py --out "$T\enc1-contract-NEW"
 python scripts/m_enc1_native_trace.py --experiment "$T\enc1-contract-NEW" --out "$T\enc1-trace-NEW" --block 4,1
 python scripts/m_enc1_native_trace.py --experiment "$T\enc1-contract-NEW" --out "$T\enc1-control-NEW" --block 2,2
 python scripts/m_capture_provenance.py --log "$T\m-capture-run\probe-1080b.log" --capture "$T\m-capture-run\capture-1080b" --json "$T\enc1-contract-NEW\provenance.json"
-python scripts/m_capture_translated_enc1.py --out "$T\enc1-translated-NEW"
+python scripts/m_capture_translated.py --out "$T\enc1-translated-NEW"
 python -m pytest tests -q
 python scripts/m_conformance.py --json "$T\enc1-contract-NEW\b4.json"
 ```
