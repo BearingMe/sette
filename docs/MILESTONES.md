@@ -35,7 +35,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M08 | RDNA 3 Native INT8 Probes | COMPLETE | PASS |
 | M09 | INT8 Kernel Reconstruction | COMPLETE | PASS |
 | M10 | Complete Network Execution | COMPLETE (bounded C05) | PASS (bounded C05) |
-| M11 | Differential Error Mapping | NOT STARTED | PENDING |
+| M11 | Differential Error Mapping | COMPLETE | PASS |
 | M12 | Weight Quantization Refinement | NOT STARTED | PENDING |
 | M13 | Activation and Temporal Refinement | NOT STARTED | PENDING |
 | M14 | Performance Baseline | NOT STARTED | PENDING |
@@ -872,23 +872,48 @@ EXP-030 (inventory), EXP-031 (oracle), EXP-032 (error), EXP-033 (checkpoints).
 
 ## M11 — Differential Error Mapping
 
+**Status:** COMPLETE / PASS for the differential investigation. The unchanged
+45 dB image gate remains **FAIL** for INT8 and is not redefined. See
+[EXP-034](experiments/EXP-034-quality-baselines.md) (baselines),
+[EXP-035](experiments/EXP-035-stage-error-attribution.md) (stage attribution),
+[EXP-036](experiments/EXP-036-precision-experiments.md) (controlled variants) and
+the [quality-gate finding](findings/2026-10-30-int8-quality-gate.md).
+
 ### Objective
 
 Identify where INT8 reconstruction diverges from the FP16 oracle.
 
 ### Checkpoints
 
-- [ ] C01: Compare intermediate tensors.
-- [ ] C02: Measure absolute and relative errors.
-- [ ] C03: Characterize distribution and saturation.
-- [ ] C04: Identify first significant divergence points.
-- [ ] C05: Track errors across residual connections.
-- [ ] C06: Investigate temporal error accumulation.
-- [ ] C07: Distinguish quantization errors from implementation defects.
+- [x] C01: Compare intermediate tensors — 21 boundaries decoded in their own
+  storage domains across 12 frames (E4M3, UNORM8, SNORM8, f16, f32, packed).
+- [x] C02: Measure absolute and relative errors — relative RMS, RMS/peak,
+  absolute RMS, percentiles and maximum per boundary.
+- [x] C03: Characterize distribution and saturation — exact-match fractions,
+  finite/saturation counts, content spread; no non-finite or saturated sample.
+- [x] C04: Identify first significant divergence points — enc0 tokens are the
+  earliest boundary (0.73% RMS/peak); the largest deviations are dec0 mix
+  (8.28%), enc2 merge (7.88%), tube-6 (6.38%) and the dec0 feature (5.48%).
+- [x] C05: Track errors across residual connections — every residual-bearing
+  layer field is compared at its boundary (`enc1/enc2/tube-1..6/dec1/dec2` and
+  the two merges); no separate residual ablation was run.
+- [x] C06: Investigate temporal error accumulation — **bounded**: 12-frame
+  sequences show no trend (index correlation 0.014) and exact reset recovery;
+  accumulation through real history reuse is BLOCKED (EXP-030/032).
+- [x] C07: Distinguish quantization errors from implementation defects — M09
+  established bit-exact CPU/GPU arithmetic; EXP-035 uses fixed-input
+  measurements (EXP-025) to separate propagation from dec0's own quantization.
 
 ### Validation Gate
 
 Major numerical divergence sources are identified through reproducible comparisons against the established independent FP16 oracle.
+
+**PASS.** [M] The three measurements are reproduced independently
+(47.0514 / 44.1393 / 44.4875 dB). The image-stage ceiling is 46.7260 dB and the
+FP16 margin above the 45 dB floor is 2.05 dB; INT8 loses 2.91 dB. The accepted
+scale scheme is the best of the tested variants, and window-local V scales are
+2.7× better than a global scale. Closing the absolute gate through scale or
+clipping changes is not supported by the evidence; the gate stays **FAIL**.
 
 ### Expected Deliverables
 
