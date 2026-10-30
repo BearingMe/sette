@@ -1,20 +1,25 @@
 // C18: the smallest native execution path this project needs.
 //
-// One compute dispatch of `gemm_f16_cs.hlsl` on a D3D12 queue, with explicit
-// resource roles:
-//   * the three operands and the parameter block arrive in upload-heap buffers
-//     and are bound as root SRVs / a root CBV;
+// One compute dispatch of `gemm_f16_cs.hlsl` or `gemm_int8_cs.hlsl` on a D3D12
+// queue, with explicit resource roles:
+//   * the operands and the parameter block arrive in upload-heap buffers and are
+//     bound as root SRVs / a root CBV;
 //   * the result is a default-heap UAV buffer copied into a readback heap;
 //   * one fence, one wait, one map - no frames, no swapchain, no inference
 //     framework.
 // Buffers are contiguous sub-allocations of three large committed resources so
 // the file stays readable without pretending to be an allocator.
 //
-// usage: m_stage_probe --case case.bin --out result.bin [--shader gemm_f16_cs.cso]
+// usage: m_stage_probe --case case.bin --out result.bin [--shader x.cso]
 //
-// case.bin: "MSTAGE01" | u32 version | u32 M | u32 K | u32 N | u32 flags
-//           | M*K f16 X | K*N f16 W | N f16 bias
-// result.bin: M*N f32
+// case.bin version 1 (FP16, gemm_f16_cs.hlsl):
+//   "MSTAGE01" | u32 version=1 | u32 M | u32 K | u32 N | u32 flags
+//   | M*K f16 X | K*N f16 W | N f16 bias
+// case.bin version 2 (INT8, gemm_int8_cs.hlsl):
+//   "MSTAGE01" | u32 version=2 | u32 M | u32 K | u32 N | u32 flags
+//   | M*K i8 A | N*K i8 W (K-major per column) | M f32 activation scales
+//   | N f32 weight scales | N f32 bias
+// result.bin: M*N f32, for both versions
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -75,7 +80,7 @@ uint32_t Align(uint32_t value) {
 ComPtr<ID3D12RootSignature> MakeRootSignature(ID3D12Device* device) {
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 3;
+    ranges[0].NumDescriptors = 5;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
@@ -163,11 +168,8 @@ public:
         if (event_) CloseHandle(event_);
     }
 
-    void Run(const Header& header, const std::vector<uint8_t>& operands, const std::vector<uint8_t>& bias,
+    void Run(const Header& header, const std::vector<std::vector<uint8_t>>& sources,
              const std::filesystem::path& shader, const std::filesystem::path& output) {
-        const uint32_t rows = header.M, k = header.K, cols = header.N;
-        (void)rows; (void)k; (void)cols;
-
         // ---- shader ------------------------------------------------------
         auto code = ReadFile(shader);
         auto signature = MakeRootSignature(device_.Get());
@@ -181,11 +183,11 @@ public:
 
         // ---- parameter block ---------------------------------------------
         std::vector<uint8_t> constants(256, 0);
-        const uint32_t values[4] = {header.M, header.K, header.N, 1u};
+        const uint32_t values[4] = {header.M, header.K, header.N, header.flags & 1u};
         std::memcpy(constants.data(), values, sizeof(values));
         GpuBuffer params = Upload(constants.size(), constants.data());
 
-        RunDispatch(header, signature.Get(), pipeline.Get(), params, operands, bias, output);
+        RunDispatch(header, signature.Get(), pipeline.Get(), params, sources, output);
     }
 
 private:
@@ -221,17 +223,14 @@ private:
     }
 
     void RunDispatch(const Header& header, ID3D12RootSignature* signature, ID3D12PipelineState* pipeline,
-                     GpuBuffer& params, const std::vector<uint8_t>& operands,
-                     const std::vector<uint8_t>& bias, const std::filesystem::path& output) {
-        const uint32_t rows = header.M, k = header.K, cols = header.N;
-        const size_t xBytes = static_cast<size_t>(rows) * k * 2;
-        const size_t wBytes = static_cast<size_t>(k) * cols * 2;
+                     GpuBuffer& params, const std::vector<std::vector<uint8_t>>& sources,
+                     const std::filesystem::path& output) {
+        const uint32_t rows = header.M, cols = header.N;
+        if (sources.empty() || sources.size() > 5) throw std::runtime_error("1..5 source buffers are supported");
 
-        std::vector<uint8_t> xData(operands.begin(), operands.begin() + xBytes);
-        std::vector<uint8_t> wData(operands.begin() + xBytes, operands.begin() + xBytes + wBytes);
-        GpuBuffer x = Upload(xData.size(), xData.data());
-        GpuBuffer w = Upload(wData.size(), wData.data());
-        GpuBuffer b = Upload(bias.size(), bias.data());
+        std::vector<GpuBuffer> uploads;
+        for (const auto& source : sources)
+            uploads.push_back(Upload(source.size(), source.data()));
 
         const size_t outBytes = static_cast<size_t>(rows) * cols * 4;
         GpuBuffer out = Committed(outBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COPY_DEST, true);
@@ -250,7 +249,7 @@ private:
         // ---- descriptors --------------------------------------------------
         D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heapDesc.NumDescriptors = 4;
+        heapDesc.NumDescriptors = 6;
         heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         ComPtr<ID3D12DescriptorHeap> heap;
         Check(device_->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&heap)), "CreateDescriptorHeap");
@@ -263,14 +262,10 @@ private:
         srv.Format = DXGI_FORMAT_R32_UINT;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Buffer.FirstElement = 0;
-        const uint32_t elementCounts[3] = {
-            static_cast<uint32_t>(xData.size() / 4), static_cast<uint32_t>(wData.size() / 4),
-            static_cast<uint32_t>(bias.size() / 4)};
-        ID3D12Resource* sources[3] = {x.resource.Get(), w.resource.Get(), b.resource.Get()};
-        for (int i = 0; i < 3; ++i) {
-            srv.Buffer.NumElements = elementCounts[i];
+        for (size_t i = 0; i < uploads.size(); ++i) {
+            srv.Buffer.NumElements = static_cast<uint32_t>((sources[i].size() + 3) / 4);
             D3D12_CPU_DESCRIPTOR_HANDLE at{cpu.ptr + SIZE_T(i) * stride};
-            device_->CreateShaderResourceView(sources[i], &srv, at);
+            device_->CreateShaderResourceView(uploads[i].resource.Get(), &srv, at);
         }
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
@@ -278,15 +273,16 @@ private:
         uav.Buffer.FirstElement = 0;
         uav.Buffer.NumElements = static_cast<uint32_t>(outBytes / 4);
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        D3D12_CPU_DESCRIPTOR_HANDLE uavAt{cpu.ptr + SIZE_T(3) * stride};
-        device_->CreateUnorderedAccessView(out.resource.Get(), nullptr, &uav, uavAt);
+        const SIZE_T uavAt = uploads.size();
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle{cpu.ptr + uavAt * stride};
+        device_->CreateUnorderedAccessView(out.resource.Get(), nullptr, &uav, uavHandle);
 
         ID3D12DescriptorHeap* heaps[] = {heap.Get()};
         list_->SetDescriptorHeaps(1, heaps);
         list_->SetComputeRootSignature(signature);
         list_->SetComputeRootConstantBufferView(0, params.address);
         list_->SetComputeRootDescriptorTable(1, gpu);
-        list_->SetComputeRootDescriptorTable(2, D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + SIZE_T(3) * stride});
+        list_->SetComputeRootDescriptorTable(2, D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + uavAt * stride});
         list_->ResourceBarrier(1, &barriers[0]);
         const UINT threads = 64;
         const UINT groups = static_cast<UINT>((static_cast<uint64_t>(rows) * cols + threads - 1) / threads);
@@ -310,7 +306,7 @@ private:
         Check(readback.resource->Map(0, nullptr, &mapped), "Map(readback)");
         WriteFile(output, mapped, outBytes);
         readback.resource->Unmap(0, nullptr);
-        std::printf("dispatch M=%u K=%u N=%u groups=%u -> %zu bytes\n", rows, k, cols, groups, outBytes);
+        std::printf("dispatch M=%u K=%u N=%u groups=%u -> %zu bytes\n", rows, header.K, cols, groups, outBytes);
     }
 
     GpuBuffer Committed(size_t size, D3D12_HEAP_TYPE type, D3D12_RESOURCE_STATES state, bool uav) {
@@ -361,21 +357,31 @@ int Run(int argc, char** argv) {
     if (bytes.size() < sizeof(Header)) throw std::runtime_error("case file is truncated");
     Header header{};
     std::memcpy(&header, bytes.data(), sizeof(header));
-    if (std::memcmp(header.magic, "MSTAGE01", 8) != 0 || header.version != 1) {
+    if (std::memcmp(header.magic, "MSTAGE01", 8) != 0 || (header.version != 1 && header.version != 2)) {
         throw std::runtime_error("unexpected case header");
     }
-    const size_t xBytes = static_cast<size_t>(header.M) * header.K * 2;
-    const size_t wBytes = static_cast<size_t>(header.K) * header.N * 2;
-    const size_t bBytes = static_cast<size_t>(header.N) * 2;
-    if (bytes.size() != sizeof(Header) + xBytes + wBytes + bBytes) {
-        throw std::runtime_error("case size does not match its header");
+    const size_t M = header.M, K = header.K, N = header.N;
+    std::vector<size_t> sizes;
+    if (header.version == 1) {
+        sizes = {M * K * 2, K * N * 2, N * 2};             // X, W, bias (f16)
+    } else {
+        if (K % 4 != 0) throw std::runtime_error("INT8 case needs K divisible by 4");
+        sizes = {M * K, N * K, M * 4, N * 4, N * 4};       // A, W, activation scales,
+                                                           // weight scales, bias
     }
-    std::vector<uint8_t> operands(bytes.begin() + sizeof(Header),
-                                  bytes.begin() + sizeof(Header) + xBytes + wBytes);
-    std::vector<uint8_t> bias(bytes.end() - bBytes, bytes.end());
+    size_t expected = sizeof(Header);
+    for (size_t size : sizes) expected += size;
+    if (bytes.size() != expected) throw std::runtime_error("case size does not match its header");
+
+    std::vector<std::vector<uint8_t>> sources;
+    size_t offset = sizeof(Header);
+    for (size_t size : sizes) {
+        sources.emplace_back(bytes.begin() + offset, bytes.begin() + offset + size);
+        offset += size;
+    }
 
     Runner runner;
-    runner.Run(header, operands, bias, shaderPath, outputPath);
+    runner.Run(header, sources, shaderPath, outputPath);
     return 0;
 }
 

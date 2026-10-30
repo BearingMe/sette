@@ -43,6 +43,12 @@ set(SHADERS
     "enc0_cs.hlsl|main|enc0_cs.cso"
     "post_cs.hlsl|main|post_cs.cso")
 
+# M09's INT8 kernel needs `dot4add_i8packed`, which is SM 6.4.  It is built in
+# its own target so the FP16 and reconstruction shaders keep their SM 6.2
+# code generation (and their measured outputs) unchanged.
+set(SHADERS64
+    "gemm_int8_cs.hlsl|main|gemm_int8_cs.cso")
+
 # The Swin block needs native 16-bit types: the contract rounds f64 sums and
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
 # 16bit-types` provides (`(half)` from double is a single conversion).
@@ -85,6 +91,22 @@ foreach(entry IN LISTS SHADERS16)
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
         DEPENDS "${input}"
         COMMENT "dxc ${source}:${entrypoint} -> ${output}")
+    list(APPEND SHADER_OUTPUTS "${artifact}")
+endforeach()
+
+foreach(entry IN LISTS SHADERS64)
+    string(REPLACE "|" ";" fields "${entry}")
+    list(GET fields 0 source)
+    list(GET fields 1 entrypoint)
+    list(GET fields 2 output)
+    set(input "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
+    set(artifact "${CMAKE_CURRENT_BINARY_DIR}/${output}")
+    add_custom_command(
+        OUTPUT "${artifact}"
+        COMMAND "${DXC_EXECUTABLE}" -T cs_6_4 -E "${entrypoint}" -O3
+                "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
+        DEPENDS "${input}"
+        COMMENT "dxc ${source}:${entrypoint} -> ${output} (cs_6_4)")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()
 
