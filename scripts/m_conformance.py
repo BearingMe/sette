@@ -14,7 +14,14 @@ by this invocation, so a stale file cannot pass either.
 usage:
   m_conformance.py                 # run every stage, then gate
   m_conformance.py --no-run        # gate existing results (still requires them)
+  m_conformance.py --network       # also run the ten-layer suite and the native chain
+  m_conformance.py --network --translated-network DIR   # B5 acceptance (EXP-019)
   m_conformance.py --json OUT
+
+B5 acceptance is the translated-PTX contract in `B5`: layer and chain bounds are
+declared up front and fail closed when the reference is absent, incomplete or was
+measured against a different build. The legacy native-replacement comparison is
+still measured and reported, but it is diagnostic and does not veto.
 """
 import argparse
 import json
@@ -59,6 +66,27 @@ CRITERIA = {
     'dec0-f16': {'identical_min': 0.9980},
     'frame': {'identical_min': 0.9990, 'max_ulp_delta': 8, 'mean_ulp_max': 1.0},
 }
+
+#: B5 acceptance, rescoped on 2026-10-29 from byte identity to the translated-PTX
+#: reference contract (EXP-019, MILESTONES B5). Every bound is declared before the
+#: run and justified by measurements of two independent implementations:
+#: the original PTX translated by ZLUDA and d4r's own native replacement agree on
+#: only 94.59-98.57% of codes per layer, so 90% is the highest round decade that no
+#: measured implementation violates, and the error ceilings sit above both.
+#: The chain criterion is relative: the reference pair's own chained dec1 fields
+#: agree on only 21.71%, so an absolute floor would encode that noise.
+B5 = {
+    'layer_identical_min': 0.90,
+    'layer_relative_rms_max': 0.02,
+    'layer_max_decoded_max': 1.5,
+    'layer_bias_max': 1.0e-3,
+    'chain_identical_margin': 0.02,
+    'chain_relative_rms_margin': 0.02,
+    'chain_max_decoded_margin': 1.0,
+}
+
+#: Layers that must all be compared, in network order. A missing entry fails B5.
+B5_LAYERS = ['enc1', 'enc2'] + [f'tube#{i}' for i in range(1, 7)] + ['dec2', 'dec1']
 
 #: The propagation chain.  Each entry clones a *consumer* fixture and overwrites
 #: the inputs that the producer stage generates, so the chain is rebuilt from
@@ -303,18 +331,120 @@ def audit_frame(fixtures):
     return result, problems
 
 
-def audit_network(report, layers_dir, suite_dir, probe, shaders):
-    """Run the ten-layer suite and the native chain, and record the B5 verdict.
+def judge_b5_layers(summary, criteria=B5):
+    """Mode A: Sette against the translated PTX layer by layer."""
+    problems, rows = [], []
+    layers = summary.get('layers') or {}
+    if not layers:
+        return rows, ['B5: the translated-PTX summary has no layers']
+    for label in B5_LAYERS:
+        data = layers.get(label)
+        if not data or data.get('status') != 'pass':
+            problems.append(f'B5 {label}: no completed translated-PTX comparison')
+            continue
+        if not all((data.get('deterministic') or {}).values()):
+            problems.append(f'B5 {label}: an implementation was not deterministic')
+        for field in ('output', 'merge'):
+            pair = (data.get('pairs') or {}).get('sette-vs-translated') or {}
+            if field not in pair:
+                continue
+            row = {'layer': label, 'field': field, **pair[field]}
+            rows.append(row)
+            scope = f'B5 {label}.{field}'
+            if row['exact'] < criteria['layer_identical_min']:
+                problems.append(f'{scope}: {100 * row["exact"]:.4f}% identical, below '
+                                f'{100 * criteria["layer_identical_min"]:.1f}%')
+            if row['relative_rms'] > criteria['layer_relative_rms_max']:
+                problems.append(f'{scope}: relative RMS {row["relative_rms"]:.5f} exceeds '
+                                f'{criteria["layer_relative_rms_max"]}')
+            if row['max_abs_decoded'] > criteria['layer_max_decoded_max']:
+                problems.append(f'{scope}: maximum decoded deviation {row["max_abs_decoded"]} '
+                                f'exceeds {criteria["layer_max_decoded_max"]}')
+            if abs(row['signed_mean_decoded']) > criteria['layer_bias_max']:
+                problems.append(f'{scope}: signed mean {row["signed_mean_decoded"]:+.6f} '
+                                f'exceeds {criteria["layer_bias_max"]}')
+            if row['nonfinite_pairs']:
+                problems.append(f'{scope}: {row["nonfinite_pairs"]} non-finite code pairs')
+            if row['saturated_reference'] != row['saturated_actual']:
+                problems.append(f'{scope}: saturation differs from the reference '
+                                f'({row["saturated_actual"]} vs {row["saturated_reference"]})')
+    return rows, problems
 
-    The layer fixtures are capture-derived and stay in the local workspace; a
-    missing directory is reported rather than silently skipped when the caller
-    asked for the network.
+
+def judge_b5_chain(summary, criteria=B5):
+    """Mode B: the chained dec1 field, gated relative to the reference pair."""
+    problems, rows = [], []
+    chain = summary.get('chain')
+    if not chain:
+        return rows, ['B5 chain: no chained translated-PTX measurement']
+    for label in B5_LAYERS:
+        data = chain.get(label)
+        if not data:
+            problems.append(f'B5 chain {label}: no chained boundary measurement')
+            continue
+        if not data.get('translated_dispatches'):
+            problems.append(f'B5 chain {label}: no translated dispatch is recorded')
+        if data.get('native_dispatches'):
+            problems.append(f'B5 chain {label}: {data["native_dispatches"]} native dispatches')
+        pairs = data.get('pairs') or {}
+        mine = pairs.get('translated-vs-sette', {}).get('output')
+        if not mine:
+            problems.append(f'B5 chain {label}: no translated-vs-Sette comparison')
+            continue
+        rows.append({'boundary': label, 'exact': mine['exact'],
+                     'relative_rms': mine['relative_rms'],
+                     'max_abs_decoded': mine['max_abs_decoded'],
+                     'reference': (pairs.get('canonical-vs-translated') or {}).get('output')})
+        if mine['nonfinite_pairs']:
+            problems.append(f'B5 chain {label}: {mine["nonfinite_pairs"]} non-finite pairs')
+    final = next((row for row in rows if row['boundary'] == 'dec1'), None)
+    if final is None:
+        problems.append('B5 chain: the chained dec1 comparison is missing')
+        return rows, problems
+    reference = final['reference']
+    if not reference:
+        problems.append('B5 chain: the canonical chained dec1 reference is missing, so the '
+                        'relative criterion cannot be evaluated')
+        return rows, problems
+    if final['exact'] + criteria['chain_identical_margin'] < reference['exact']:
+        problems.append(
+            f'B5 chain dec1: {100 * final["exact"]:.4f}% identical, more than '
+            f'{100 * criteria["chain_identical_margin"]:.0f} points below the reference '
+            f'pair\'s own {100 * reference["exact"]:.4f}%')
+    if final['relative_rms'] > reference['relative_rms'] + criteria['chain_relative_rms_margin']:
+        problems.append(f'B5 chain dec1: relative RMS {final["relative_rms"]:.5f} exceeds the '
+                        f'reference pair\'s {reference["relative_rms"]:.5f} by more than '
+                        f'{criteria["chain_relative_rms_margin"]}')
+    if final['max_abs_decoded'] > reference['max_abs_decoded'] + criteria['chain_max_decoded_margin']:
+        problems.append(f'B5 chain dec1: maximum decoded deviation '
+                        f'{final["max_abs_decoded"]} exceeds the reference pair\'s '
+                        f'{reference["max_abs_decoded"]} by more than '
+                        f'{criteria["chain_max_decoded_margin"]}')
+    return rows, problems
+
+
+def sha256(path):
+    import hashlib
+    with open(path, 'rb') as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def audit_network(report, layers_dir, suite_dir, probe, shaders, translated,
+                  network_probe):
+    """Record the legacy comparison and gate B5 against the translated reference.
+
+    The legacy native-replacement comparison stays diagnostic: it is measured and
+    printed but does not veto, because the reference pair disagrees with itself by
+    more than that comparison's resolution (EXP-019). B5 acceptance is the
+    translated-PTX contract in `B5`, and it fails closed when the reference is
+    absent, incomplete or was measured against a different build.
     """
     if not os.path.isdir(layers_dir):
         report['problems'].append(f'network: no layer fixtures at {layers_dir}')
         return
     suite = os.path.join(suite_dir, 'm_layer_suite.py')
     python = sys.executable
+    legacy = {}
     for command, key in (('check', 'layers'), ('chain', 'chain')):
         out = os.path.join(layers_dir, f'{key}-gate.json')
         done = subprocess.run([python, suite, command, layers_dir, '--probe', probe,
@@ -331,24 +461,60 @@ def audit_network(report, layers_dir, suite_dir, probe, shaders):
             report['problems'].append(f'network: {command} produced no report '
                                       f'({done.stderr.strip()[-300:]})')
             continue
-        report['b5'] = report.get('b5', {})
-        report['b5'][key] = record
+        legacy[key] = record
         if command == 'check':
             for row in record.get('layers', []):
                 for role, value in row['outputs'].items():
                     report['surfaces'][f'{row["layer"]}.{role}'] = value
                     print(f'  {row["layer"] + "." + role:22s} identical '
                           f'{100 * value["identical"]:8.4f}%  {value["differing"]:>7d} differ')
-            if not record.get('pass'):
-                report['problems'].append('network: the layer suite did not pass')
-        else:
-            if record:
-                print(f'  {"chain.dec1":22s} identical '
-                      f'{100 * record.get("identical", 0):8.4f}%  '
-                      f'{record.get("differing", 0):>7d} differ  '
-                      f'deterministic={record.get("deterministic")}')
-            if done.returncode:
-                report['problems'].append('network: the native chain did not meet its floor')
+        elif record:
+            print(f'  {"chain.dec1":22s} identical '
+                  f'{100 * record.get("identical", 0):8.4f}%  '
+                  f'{record.get("differing", 0):>7d} differ  '
+                  f'deterministic={record.get("deterministic")}')
+    legacy['pass'] = bool(legacy.get('layers', {}).get('pass')) and \
+        not legacy.get('chain', {}).get('problems')
+    report['legacy'] = legacy
+    print(f'  legacy native-replacement gate: '
+          f'{"pass" if legacy["pass"] else "fail"} (diagnostic, does not veto B5)')
+
+    if not translated:
+        report['problems'].append('B5: no translated-PTX reference supplied '
+                                  '(--translated-network); the acceptance criterion '
+                                  'cannot be evaluated')
+        return
+    path = os.path.join(translated, 'summary.json')
+    if not os.path.isfile(path):
+        report['problems'].append(f'B5: no suite summary at {path}')
+        return
+    with open(path) as handle:
+        summary = json.load(handle)
+    measured = summary.get('sette_execution') or {}
+    if measured.get('probe_sha256') != sha256(network_probe):
+        report['problems'].append('B5: the translated reference was measured against a '
+                                  'different Sette executable')
+    for name, digest in (measured.get('shaders') or {}).items():
+        current = os.path.join(shaders, name)
+        if not os.path.isfile(current) or sha256(current) != digest:
+            report['problems'].append(f'B5: shader {name} changed since the translated '
+                                      'reference was measured')
+    rows, problems = judge_b5_layers(summary)
+    chain_rows, chain_problems = judge_b5_chain(summary)
+    report['b5'] = {'criteria': B5, 'layers': rows, 'chain': chain_rows,
+                    'problems': problems + chain_problems,
+                    'summary': path, 'sette_execution': measured}
+    report['problems'] += problems + chain_problems
+    for row in rows:
+        print(f'  {row["layer"] + "." + row["field"]:22s} translated identical '
+              f'{100 * row["exact"]:8.4f}%  rms {row["relative_rms"]:.5f}  '
+              f'max {row["max_abs_decoded"]:.2f}  bias {row["signed_mean_decoded"]:+.6f}')
+    final = next((row for row in chain_rows if row['boundary'] == 'dec1'), None)
+    if final:
+        reference = final['reference'] or {}
+        print(f'  {"chain.dec1 translated":22s} identical {100 * final["exact"]:8.4f}%  '
+              f'reference pair {100 * reference.get("exact", 0):8.4f}%  '
+              f'rms {final["relative_rms"]:.5f} vs {reference.get("relative_rms", 0):.5f}')
 
 
 def main():
@@ -362,6 +528,9 @@ def main():
                     help='gate the existing results instead of running the stages')
     ap.add_argument('--network', action='store_true',
                     help='also run the ten-layer suite and the native chain (B5)')
+    ap.add_argument('--translated-network', default=os.environ.get('SETTE_TRANSLATED'),
+                    help='directory holding the translated-PTX suite summary.json '
+                         '(required for the B5 acceptance criterion)')
     ap.add_argument('--network-probe',
                     default=os.path.join(REPO, 'build', 'native', 'Release',
                                          'm_network_stage.exe'))
@@ -408,7 +577,8 @@ def main():
 
     if a.network:
         print('\n  B5 ten-layer network:')
-        audit_network(report, a.layers, HERE, a.network_probe, a.shaders)
+        audit_network(report, a.layers, HERE, a.network_probe, a.shaders,
+                      a.translated_network, a.network_probe)
 
     # structural invariants
     dec0 = {role: np.frombuffer(
