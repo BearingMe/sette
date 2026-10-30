@@ -27,16 +27,40 @@ Buffer<uint> A : register(t0);
 RWBuffer<uint> Codes : register(u0);
 RWBuffer<uint> Scales : register(u1);
 
-[numthreads(64, 1, 1)]
-void Quantize(uint3 id : SV_DispatchThreadID)
+// Four lanes cooperate on one token.  `max` is exact and associative and each
+// element's code depends only on its own value and the row inverse, so the
+// 4-way split is bit-identical to the one-thread-per-token version.  All uses
+// have K in {128, 32, 16}, i.e. K/4 is a whole number of 4-element words.
+#define Q8_LANES 4
+
+groupshared float g_rowmax[64 * Q8_LANES];
+
+[numthreads(256, 1, 1)]
+void Quantize(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
-    uint tok = id.x;
-    if (tok >= Tokens)
-        return;
-    uint base = tok * K;
+    // The host still dispatches ceil(Tokens / 64) groups: 64 tokens per group,
+    // four lanes each, 256 threads.
+    uint local = gi >> 2;
+    uint lane = gi & (Q8_LANES - 1u);
+    uint tok = (id.x >> 8) * 64u + local;
+    bool active = tok < Tokens;
+    uint safe = active ? tok : (Tokens > 0u ? Tokens - 1u : 0u);
+
+    uint chunk = K >> 2;                 // elements per lane
+    uint base = safe * K + lane * chunk;
     float mx = 0.0f;
-    for (uint c = 0; c < K; ++c)
+    for (uint c = 0; c < chunk; ++c)
         mx = max(mx, abs(HalfAt(A, base + c)));
+
+    g_rowmax[local * Q8_LANES + lane] = mx;
+    GroupMemoryBarrierWithGroupSync();
+    float m0 = g_rowmax[local * Q8_LANES + 0u];
+    float m1 = g_rowmax[local * Q8_LANES + 1u];
+    float m2 = g_rowmax[local * Q8_LANES + 2u];
+    float m3 = g_rowmax[local * Q8_LANES + 3u];
+    mx = max(max(m0, m1), max(m2, m3));
+    if (!active)
+        return;
     if (mx == 0.0f)
         mx = 1.0f;
     // 127/max_abs, correctly rounded to f32.
@@ -55,10 +79,11 @@ void Quantize(uint3 id : SV_DispatchThreadID)
     float invf = 127.0f / mx;
     double residual = 127.0 - (double)invf * (double)mx;
     float inv = (float)((double)invf + residual / (double)mx);
-    Scales[tok] = asuint(mx * 0.0078740157f);       // f32(1/127), the epilogue scale
+    if (lane == 0u)
+        Scales[tok] = asuint(mx * 0.0078740157f);   // f32(1/127), the epilogue scale
 
     uint wordBase = base >> 2;
-    for (uint g = 0; g < (K >> 2); ++g)
+    for (uint g = 0; g < (chunk >> 2); ++g)
     {
         uint word = 0;
         for (uint j = 0; j < 4u; ++j)

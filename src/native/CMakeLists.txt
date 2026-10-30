@@ -25,6 +25,17 @@ foreach(target m_stage_probe m_image_stage m_network_stage)
     target_link_libraries(${target} PRIVATE d3d12 dxgi)
 endforeach()
 
+# M12 profiling builds: the same sources plus optional D3D12 timestamp queries.
+# The accepted hosts above are not rebuilt with these definitions, so their
+# binaries (and the hashes M09 evidence is tied to) stay unchanged.
+add_executable(m_image_stage_timed m_image_stage.cpp)
+add_executable(m_network_stage_timed m_network_stage.cpp)
+foreach(target m_image_stage_timed m_network_stage_timed)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+    target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN M_TIMING)
+    target_link_libraries(${target} PRIVATE d3d12 dxgi)
+endforeach()
+
 find_program(DXC_EXECUTABLE
     NAMES dxc
     HINTS "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/10.0.26100.0/x64")
@@ -138,4 +149,6 @@ add_custom_target(m_stage_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_dependencies(m_stage_probe m_stage_shaders)
 add_dependencies(m_image_stage m_stage_shaders)
 add_dependencies(m_network_stage m_stage_shaders)
+add_dependencies(m_image_stage_timed m_stage_shaders)
+add_dependencies(m_network_stage_timed m_stage_shaders)
 

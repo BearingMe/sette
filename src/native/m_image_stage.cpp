@@ -32,10 +32,15 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef M_TIMING
+#include "m_timing.h"
+#endif
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -270,9 +275,26 @@ public:
         if (event_) CloseHandle(event_);
     }
 
-    void Run(Fixture& f, const fs::path& outputDir, int seed = -1) {
+    void Issue(const std::string& label, UINT x, UINT y, UINT z) {
+#ifdef M_TIMING
+        if (timer_) timer_->Begin(list_.Get());
+#endif
+        list_->Dispatch(x, y, z);
+#ifdef M_TIMING
+        if (timer_) timer_->End(list_.Get(), label);
+#endif
+    }
+
+    void Run(Fixture& f, const fs::path& outputDir, int seed = -1,
+             const std::string& timingPath = "") {
         const bool dec0Int8 = !f.dec0Weights.empty();
         const bool enc0Int8 = !f.enc0Weights.empty();
+#ifdef M_TIMING
+        std::unique_ptr<timing::GpuTimer> timer;
+        if (!timingPath.empty())
+            timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(), 32);
+        timer_ = timer.get();
+#endif
         if (enc0Int8) {
             if (dec0Int8 || f.enc0Weights.size()!=3 || f.bindings.size()!=3 ||
                 f.params.size()!=24 || f.shader.filename()!="enc0_q8_epilogue.cso" ||
@@ -448,7 +470,7 @@ public:
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
             list_->ResourceBarrier(1, &barrier);
         }
-        list_->Dispatch(f.groups[0], f.groups[1], f.groups[2]);
+        Issue("main", f.groups[0], f.groups[1], f.groups[2]);
 
         // ---- read back every output -------------------------------------
         for (size_t i = 0; i < f.bindings.size(); ++i) {
@@ -485,6 +507,9 @@ public:
                 list_->CopyBufferRegion(prefix.readback.back().resource.Get(),0,source->resource.Get(),0,prefix.bytes[i]);
             }
         }
+#ifdef M_TIMING
+        if (timer) timer->Resolve(list_.Get());
+#endif
         Check(list_->Close(), "Close(list)");
 
         ID3D12CommandList* lists[] = {list_.Get()};
@@ -492,6 +517,11 @@ public:
         Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
         WaitForSingleObject(event_, INFINITE);
+
+#ifdef M_TIMING
+        if (timer) timer->Write(timingPath);
+        timer_ = nullptr;
+#endif
 
         if (infoQueue_) {
             const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
@@ -619,7 +649,7 @@ private:
             list_->SetPipelineState(p.pipelines.back().Get());list_->SetComputeRootSignature(p.signatures.back().Get());
             list_->SetComputeRootConstantBufferView(0,cb.address);list_->SetComputeRootDescriptorTable(1,gpu);
             list_->SetComputeRootDescriptorTable(2,D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr+srvs.size()*stride});
-            list_->Dispatch(groups,1,1);p.heaps.push_back(heap);
+            Issue(shader,groups,1,1);p.heaps.push_back(heap);
             std::printf("enc0 prefix %s: dispatch %ux1x1\n",shader,groups);
         };
         auto& b=p.buffers;
@@ -686,7 +716,7 @@ private:
             list_->SetComputeRootConstantBufferView(0, params.address);
             list_->SetComputeRootDescriptorTable(1, gpu);
             list_->SetComputeRootDescriptorTable(2, D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + srvs.size() * stride});
-            list_->Dispatch(2040, y, 1);
+            Issue(shader, 2040, y, 1);
             std::printf("dec0 prefix %s: dispatch 2040x%ux1\n", shader, y);
             p.heaps.push_back(heap);
         };
@@ -937,10 +967,14 @@ private:
     ComPtr<ID3D12Fence> fence_;
     HANDLE event_ = nullptr;
     uint64_t fenceValue_ = 0;
+#ifdef M_TIMING
+    timing::GpuTimer* timer_ = nullptr;
+#endif
 };
 
 int Run(int argc, char** argv) {
     fs::path manifest, outputDir = ".", shaderDir;
+    std::string timingPath;
     int seed = -1;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -948,6 +982,9 @@ int Run(int argc, char** argv) {
         else if (arg == "--out" && i + 1 < argc) outputDir = argv[++i];
         else if (arg == "--shaders" && i + 1 < argc) shaderDir = argv[++i];
         else if (arg == "--seed" && i + 1 < argc) seed = std::stoi(argv[++i]);
+#ifdef M_TIMING
+        else if (arg == "--timing" && i + 1 < argc) timingPath = argv[++i];
+#endif
         else throw std::runtime_error("unknown option " + arg);
     }
     if (manifest.empty()) {
@@ -957,7 +994,7 @@ int Run(int argc, char** argv) {
     }
     Fixture fixture = Parse(manifest, shaderDir);
     Runner runner;
-    runner.Run(fixture, outputDir, seed);
+    runner.Run(fixture, outputDir, seed, timingPath);
     return 0;
 }
 

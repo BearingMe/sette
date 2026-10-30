@@ -25,6 +25,7 @@
 // two runs with different seeds show exactly which bytes the graph wrote.
 //
 // usage: m_network_stage --graph graph.txt --out DIR [--shaders DIR] [--seed N]
+//        [--timing FILE]        (`m_network_stage_timed` only)
 
 #include <windows.h>
 #include <d3d12.h>
@@ -38,10 +39,15 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef M_TIMING
+#include "m_timing.h"
+#endif
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -243,12 +249,20 @@ public:
         if (event_) CloseHandle(event_);
     }
 
-    void Run(Graph& g, const fs::path& outputDir, uint32_t seed) {
+    void Run(Graph& g, const fs::path& outputDir, uint32_t seed,
+             const std::string& timingPath = "") {
         for (Resource& r : g.resources) Create(r, seed);
         for (Stage& s : g.stages) Prepare(s, g);
 
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
+
+#ifdef M_TIMING
+        std::unique_ptr<timing::GpuTimer> timer;
+        if (!timingPath.empty())
+            timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(),
+                                                       g.stages.size() + 1);
+#endif
 
         for (Stage& s : g.stages) {
             ID3D12DescriptorHeap* heaps[] = {s.heap.Get()};
@@ -276,7 +290,13 @@ public:
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             barrier.UAV.pResource = nullptr;
             list_->ResourceBarrier(1, &barrier);
+#ifdef M_TIMING
+            if (timer) timer->Begin(list_.Get());
+#endif
             list_->Dispatch(s.groups[0], s.groups[1], s.groups[2]);
+#ifdef M_TIMING
+            if (timer) timer->End(list_.Get(), s.name);
+#endif
         }
 
         // readback of the requested ranges
@@ -290,12 +310,19 @@ public:
             list_->CopyBufferRegion(readback.Get(), 0, r.gpu.Get(), d.offset, d.bytes);
             readbacks.push_back(readback);
         }
+#ifdef M_TIMING
+        if (timer) timer->Resolve(list_.Get());
+#endif
         Check(list_->Close(), "Close(list)");
         ID3D12CommandList* lists[] = {list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
         Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
         WaitForSingleObject(event_, INFINITE);
+
+#ifdef M_TIMING
+        if (timer) timer->Write(timingPath);
+#endif
 
         if (infoQueue_) {
             const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
@@ -533,6 +560,7 @@ private:
 
 int Run(int argc, char** argv) {
     fs::path manifest, outputDir = ".", shaderDir;
+    std::string timingPath;
     uint32_t seed = 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -540,6 +568,9 @@ int Run(int argc, char** argv) {
         else if (arg == "--out" && i + 1 < argc) outputDir = argv[++i];
         else if (arg == "--shaders" && i + 1 < argc) shaderDir = argv[++i];
         else if (arg == "--seed" && i + 1 < argc) seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+#ifdef M_TIMING
+        else if (arg == "--timing" && i + 1 < argc) timingPath = argv[++i];
+#endif
         else throw std::runtime_error("unknown option " + arg);
     }
     if (manifest.empty()) {
@@ -552,7 +583,7 @@ int Run(int argc, char** argv) {
     for (Stage& s : graph.stages)
         if (!fs::exists(s.shader) && !shaderDir.empty()) s.shader = shaderDir / s.shader.filename();
     Runner runner;
-    runner.Run(graph, outputDir, seed);
+    runner.Run(graph, outputDir, seed, timingPath);
     return 0;
 }
 

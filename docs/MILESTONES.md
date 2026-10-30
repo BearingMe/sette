@@ -38,8 +38,8 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M11 | Differential Error Mapping | COMPLETE | PASS |
 | M12 | Weight Quantization Refinement | NOT STARTED | PENDING |
 | M13 | Activation and Temporal Refinement | NOT STARTED | PENDING |
-| M14 | Performance Baseline | NOT STARTED | PENDING |
-| M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
+| M14 | Performance Baseline | IN PROGRESS | PASS (bounded) |
+| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (bounded) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
 Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
@@ -990,37 +990,53 @@ Selected changes improve measured numerical or temporal fidelity without conceal
 
 ## M14 — Performance Baseline
 
+**Status:** IN PROGRESS / PASS for the measured native comparison. The current
+mission's performance plan ("M12-A..E") maps here and to M15. See
+[EXP-037](experiments/EXP-037-profiling-environment.md) (environment),
+[EXP-038](experiments/EXP-038-dispatch-profile.md) (per-dispatch timing),
+[EXP-039](experiments/EXP-039-bottleneck-analysis.md) (bottlenecks) and the
+[performance finding](findings/2026-10-30-int8-performance.md).
+
 ### Objective
 
 Establish representative end-to-end performance measurements.
 
 ### Checkpoints
 
-- [ ] C01: Define repeatable benchmarking conditions.
-- [ ] C02: Measure conservative FP16 reference latency.
-- [ ] C03: Measure optimized FP16 reference latency.
-- [ ] C04: Measure INT8 inference latency.
-- [ ] C05: Separate kernel and dispatch overhead.
-- [ ] C06: Measure memory and conversion costs.
-- [ ] C07: Record VRAM consumption.
-- [ ] C08: Inspect workload-dependent bottlenecks.
-- [ ] C09: Control warmup, synchronization, and GPU validation overhead.
+- [x] C01: Define repeatable benchmarking conditions - D3D12 timestamp queries,
+  interleaved modes, warm-up, 5 repeats, frame-hash gate (EXP-037).
+- [x] C02: Measure conservative FP16 reference latency - 600.124 ms median,
+  585.4-610.6 ms range.
+- [ ] C03: Measure optimized FP16 reference latency - only the native FP16 path
+  exists; no separately optimized FP16 reference was built.
+- [x] C04: Measure INT8 inference latency - 205.167 ms median, 202.9-209.0 ms.
+- [x] C05: Separate kernel and dispatch overhead - bounded: per-dispatch
+  timestamps, but launch/barrier overhead cannot be isolated; 60 dispatches
+  below 0.1 ms total 2.5 ms.
+- [x] C06: Measure memory and conversion costs - declared traffic and the
+  quantization/pack families are measured; no DRAM counters.
+- [ ] C07: Record VRAM consumption - declared chain footprint is 680 buffers /
+  4.39 GB; peak resident VRAM was not measured.
+- [x] C08: Inspect workload-dependent bottlenecks - family/stage profile; scene
+  dependence was not swept.
+- [x] C09: Control warmup, synchronization, and GPU validation overhead - one
+  warm-up frame, one fence per process, timestamps inside the submission.
 
 ### Validation Gate
 
 Baseline comparisons are reproducible and use equivalent workloads, stated measurement conditions, and clearly separated reference paths.
 
-### Expected Deliverables
-
-- Performance experiments and profiling findings.
-
-### Dependencies
-
-- M05 and M10.
+**PASS for the bounded comparison.** Interleaved repeats of the same frame give
+600.124 ms (FP16) vs 205.167 ms (INT8), **2.93x**, with every frame hash equal to
+the accepted M09 output. Peak VRAM and an optimized FP16 reference remain open.
 
 ---
 
 ## M15 — RDNA 3 Optimization
+
+**Status:** IN PROGRESS / PASS for one accepted optimization. The current
+mission's optimization step ("M12-D") maps here. See
+[EXP-040](experiments/EXP-040-optimization-results.md).
 
 ### Objective
 
@@ -1028,28 +1044,33 @@ Improve native INT8 performance without exceeding fidelity limits.
 
 ### Checkpoints
 
-- [ ] C01: Identify dominant execution bottlenecks.
-- [ ] C02: Optimize WMMA tile selection.
-- [ ] C03: Compare DP4A alternatives.
-- [ ] C04: Improve memory coalescing and LDS usage.
-- [ ] C05: Reduce redundant conversions.
-- [ ] C06: Investigate kernel fusion.
-- [ ] C07: Improve buffer lifetime and reuse.
-- [ ] C08: Reduce dispatch and synchronization costs.
-- [ ] C09: Evaluate wave occupancy and register pressure.
-- [ ] C10: Measure complete-frame improvements.
+- [x] C01: Identify dominant execution bottlenecks - quantize/pack 28% of the
+  INT8 chain, MLP ~38%, attention ~24%; effective bandwidth 10-22 GB/s for the
+  large quantizers (EXP-039).
+- [ ] C02: Optimize WMMA tile selection - no WMMA remains in the full INT8 path;
+  not applicable to the accepted graph.
+- [ ] C03: Compare DP4A alternatives - `dot4add_i8packed` is the executed path;
+  no alternative was compared.
+- [x] C04: Improve memory coalescing and LDS usage - four lanes per row with a
+  groupshared max; contiguous whole-word writes per lane.
+- [ ] C05: Reduce redundant conversions - no conversion was removed.
+- [ ] C06: Investigate kernel fusion - quantize-into-GEMM fusion identified as
+  the highest-value next step; not implemented.
+- [ ] C07: Improve buffer lifetime and reuse - unchanged.
+- [ ] C08: Reduce dispatch and synchronization costs - dispatch count unchanged.
+- [ ] C09: Evaluate wave occupancy and register pressure - no occupancy counter
+  available; parallelism improved without measuring occupancy.
+- [x] C10: Measure complete-frame improvements - ~7-9.5% INT8 GPU time reduction,
+  bit-identical output (EXP-040).
 
 ### Validation Gate
 
 Optimizations provide reproducible end-to-end benefit without violating established correctness/fidelity limits; generated ISA and workload/measurement conditions are recorded.
 
-### Expected Deliverables
-
-- Optimized kernels, performance tests, and findings.
-
-### Dependencies
-
-- M08, M10, M11, and M14.
+**PASS for the accepted change.** The 4-lane quantizer reproduces the accepted
+INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 365
+tests green, and reduces end-to-end INT8 GPU time by ~7-9.5% in the A/B blocks.
+No other optimization is claimed.
 
 ---
 
