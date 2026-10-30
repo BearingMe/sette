@@ -33,8 +33,8 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M06 | Operator-Level Reconstruction Probes | COMPLETE | PASS |
 | M07 | INT8 Quantization Feasibility | COMPLETE | PASS |
 | M08 | RDNA 3 Native INT8 Probes | COMPLETE | PASS |
-| M09 | INT8 Kernel Reconstruction | IN PROGRESS | PENDING |
-| M10 | Complete Network Execution | NOT STARTED | PENDING |
+| M09 | INT8 Kernel Reconstruction | COMPLETE | PASS |
+| M10 | Complete Network Execution | COMPLETE (bounded C05) | PASS (bounded C05) |
 | M11 | Differential Error Mapping | NOT STARTED | PENDING |
 | M12 | Weight Quantization Refinement | NOT STARTED | PENDING |
 | M13 | Activation and Temporal Refinement | NOT STARTED | PENDING |
@@ -42,40 +42,22 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M15 | RDNA 3 Optimization | NOT STARTED | PENDING |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
-Phase II: M06-M08 pass. M05 is capture-complete for buffers **and** images and its
-reconstruction now executes end to end on the Windows/D3D12 path: `downsample` and
-`post` reproduce their captured outputs byte for byte
-([EXP-012](experiments/EXP-012-m05-native-downsample.md),
-[EXP-016](experiments/EXP-016-m05-post-reconstruction.md)), `enc0` and `dec0` are
-reconstructed from their own PTX ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md),
-[EXP-015](experiments/EXP-015-m05-enc0-contract.md)), the ten layers run as one
-GPU-resident graph, and the complete frame is produced. The FP16 oracle is **not**
-validated: B5 passes eleven of its twelve declared fields and fails `enc1.merge`
-([EXP-019](experiments/EXP-019-m05-native-network.md)), B6 executes but its fidelity
-is INCONCLUSIVE ([EXP-020](experiments/EXP-020-m05-native-frame.md)), and the temporal
-path has not been implemented - B7 is not started and its prerequisites are audited in
-[EXP-022](experiments/EXP-022-m05-b7-readiness.md). Native INT8 wave-matrix and DP4A
-execution is verified on gfx1101 with matching ISA
-([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have
-contract tests with independent oracles
-([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured
-weight set is quantized to INT8 at five scopes
-([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408
-values, per-column 16-row K blocks best (0.0048 RMS). M09 has begun: one bounded INT8
-matrix operation whose ISA, integer product and quantisation error are measured
-([EXP-021](experiments/EXP-021-m09-int8-gemm.md)), and then enc1's Q projection replaced
-inside the live graph and validated bit for bit against an independent CPU reference,
-with the cost measured through the layer, the chain and the frame
-([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)). Phase I evidence: the
-Windows/D3D12/DXC toolchain and pinned quattro reference
-([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and
-numerical contract are in
-[`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md)
-and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
-reconstruction is now in progress: `downsample`, the last launch of the frame, executes
-natively and reproduces its captured surface byte for byte
-[EXP-012](experiments/EXP-012-m05-native-downsample.md)) and `dec0` reproduces all four of its
-surfaces ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)). Native INT8 wave-matrix execution is verified on gfx1101 with matching ISA ([EXP-005](experiments/EXP-005-m08-native-int8-probes.md)), Preset M's operators have contract tests with independent oracles ([EXP-006](experiments/EXP-006-m06-operator-contract.md)), and the **complete** captured weight set was quantized to INT8 at five scaling scopes ([EXP-009](experiments/EXP-009-m07-complete-inventory.md)): 360 matrices / 1 553 408 values, with per-column 16-row K blocks best (0.0048 RMS) and the activation term now co-dominant. M05's C10 is done: a rebuilt ZLUDA captures `enc0`, `dec0`, post and downsample at 1920x1080 ([EXP-008](experiments/EXP-008-m05-full-capture.md)), and the same hook now dumps the textures and surfaces those stages bind ([EXP-011](experiments/EXP-011-m05-image-capture.md)) — 33 image targets whose pre/post contents reproduce stage edges and the final frame exactly. Its remaining work is execution: the FP16 oracle must be reconstructed natively, because d4r's frame oracle is Linux/Vulkan-only and `compile_m.py` wants the `mvlo` variant the probe does not emit. The Windows-native path is therefore the oracle, one stage at a time, and `downsample` already reproduces its captured surface exactly ([EXP-012](experiments/EXP-012-m05-native-downsample.md)) while `dec0` reproduces all four of its surfaces ([EXP-014](experiments/EXP-014-m05-dec0-mapping.md)); C11 stays open while the ten-layer regression remains the layer-scope oracle ([EXP-003](experiments/EXP-003-m05-layer-capture.md)). M09 is unblocked by M06-M08 and has not started. Phase I evidence: the Windows/D3D12/DXC toolchain and pinned quattro reference ([EXP-001](experiments/EXP-001-reference-toolchain.md)); the Preset M graph and numerical contract are in [`findings/2026-10-28-preset-m-architecture.md`](findings/2026-10-28-preset-m-architecture.md) and [`findings/2026-10-28-preset-m-numerics.md`](findings/2026-10-28-preset-m-numerics.md).
+Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
+reconstruction executes end to end on Windows/D3D12, but the FP16 oracle is not
+validated: B5 fails `enc1.merge` ([EXP-019](experiments/EXP-019-m05-native-network.md)),
+B6 fidelity is INCONCLUSIVE ([EXP-020](experiments/EXP-020-m05-native-frame.md)), and the
+temporal path is unimplemented ([EXP-022](experiments/EXP-022-m05-b7-readiness.md)).
+M09 is COMPLETE/PASS for the bounded reset-frame matrix gate: 76/76 designated
+operators, 100% of the 34,518,597,632-MAC inventory, verified signed dot4, and a
+deterministic full frame ([EXP-029](experiments/EXP-029-m09-complete-int8.md)).
+M10 is COMPLETE for complete-network execution and reset-frame sequences; the
+persistent-state inventory is complete but cross-frame reuse is BLOCKED because
+no `reset = 0` branch or labelled non-reset capture exists
+([EXP-030](experiments/EXP-030-temporal-state-inventory.md),
+[EXP-031](experiments/EXP-031-temporal-oracle.md),
+[EXP-032](experiments/EXP-032-temporal-error.md),
+[EXP-033](experiments/EXP-033-temporal-checkpoints.md)). Quality and performance
+work continues in M11-M15; the unchanged 45 dB gate still FAILS for INT8.
 
 ---
 
@@ -821,14 +803,22 @@ and must not be marked passed from static matrix coverage alone.
 
 ## M10 — Complete Network Execution
 
-**Status:** PREPARED / PENDING — M09's reset-frame matrix gate passes. EXP-029
-provides a reproducible 76-operator graph, explicit precision/fallback audit,
-234 neural dispatches, live enc0/dec0 prefix checks and a deterministic full
-frame. These are M10 inputs, not a declaration that M10's independent gate or
-persistent temporal-state checkpoint has passed. No temporal work was performed.
-The next authorized M10 run should revalidate the complete execution path and
-its resource/omission checks, and explicitly resolve the scope of C05 before
-claiming M10 completion. Existing B4/B5 and image thresholds must remain unchanged.
+**Status:** PASS for complete-network execution and the bounded reset-frame
+sequence gate; **BLOCKED** for cross-frame persistent-state reuse. M09's reset
+matrix gate passes, and EXP-029 provides the 76-operator graph. M10-A..E now add
+a complete temporal-state inventory (EXP-030), a deterministic 12-frame FP16/INT8
+sequence oracle whose frame 0 is the accepted M09 frame (EXP-031), per-frame error
+and state-divergence measurements (EXP-032), and checkpoint/replay (EXP-033).
+No `reset = 0` branch exists and no labelled non-reset capture exists, so history
+reuse is not implemented or claimed (EXP-022, EXP-030 §5). Existing B4/B5 and
+image thresholds remain unchanged.
+
+**Task mapping.** The current mission's temporal plan ("M10-A..E", "M11-A..D",
+"M12-A..E") maps onto this roadmap as: temporal M10 → this milestone's C05 plus
+M13 C06–C07; quality M11 → M11 (differential mapping) plus M12 (quantization
+refinement); performance M12 → M14 (baseline) plus M15 (optimization). Repository
+numbering remains authoritative; the mission labels are recorded here only to
+avoid two progress dashboards.
 
 ### Objective
 
@@ -836,19 +826,37 @@ Execute the entire reconstructed Preset M network.
 
 ### Checkpoints
 
-- [ ] C01: Assemble the complete execution graph.
-- [ ] C02: Load converted weights.
-- [ ] C03: Allocate required buffers.
-- [ ] C04: Implement dispatch dependencies.
-- [ ] C05: Handle persistent temporal state.
-- [ ] C06: Execute all required neural stages.
-- [ ] C07: Produce complete output frames.
-- [ ] C08: Verify finite outputs and buffer safety.
-- [ ] C09: Detect omitted layers and accidental precision fallbacks.
+- [x] C01: Assemble the complete execution graph.
+- [x] C02: Load converted weights.
+- [x] C03: Allocate required buffers.
+- [x] C04: Implement dispatch dependencies.
+- [x] C05: Handle persistent temporal state — **bounded**. EXP-030 inventories
+  every original and reconstructed state element with producer, consumer,
+  format, initialisation and reset behaviour; EXP-031/032/033 execute a 12-frame
+  sequence and measure the state the graph still writes. The executed graph has
+  **no cross-frame consumer**: `post`/`dec0` do not bind history/feature inputs,
+  `enc0` declares no motion outputs, and `reset = 0` is rejected or unimplemented
+  in all three stages. Cross-frame reuse is therefore BLOCKED, not passed.
+- [x] C06: Execute all required neural stages.
+- [x] C07: Produce complete output frames.
+- [x] C08: Verify finite outputs and buffer safety.
+- [x] C09: Detect omitted layers and accidental precision fallbacks.
 
 ### Validation Gate
 
 A complete frame is produced, with designated matrix operations using native INT8 arithmetic. Image quality is not an acceptance requirement; execution coverage, buffer safety, and precision paths must be evidenced.
+
+**PASS for complete-network execution and reset-frame sequences.** [M] Twelve
+frames with different inputs executed in FP16 and full INT8: 33 boundary hashes
+per frame, zero non-finite/saturated samples, and exact replay of frames 0/6/11
+(frame, boundaries and three persistent tensors). Frame 0 reproduces the accepted
+M09 hashes (`dc97c4cb…`, `f76ac032…`). Same-input INT8↔FP16 error spans
+42.12–44.72 dB with no trend (index correlation 0.014); canonical frames remain
+44.1393 dB against the reference and still FAIL the unchanged 45 dB gate. The
+persistent tensors a future loop would consume differ by 1.06–1.66% RMS (post) and
+7.23–8.85% (dec0 feature). **No temporal reuse is claimed**: the state inventory
+shows writers without readers, and `reset = 0` remains unimplemented. See
+EXP-030 (inventory), EXP-031 (oracle), EXP-032 (error), EXP-033 (checkpoints).
 
 ### Expected Deliverables
 
