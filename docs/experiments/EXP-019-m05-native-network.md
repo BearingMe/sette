@@ -1227,3 +1227,121 @@ this addendum: `translated-layers-20261029-c` (`summary.json`, `b4-b5.json`) and
 `enc1-translated-20261029-b` (fresh enc1 capture whose input, output and merge fields
 equal the earlier run byte for byte). Regression tests for the criteria, the
 fail-closed paths and the legacy non-veto behaviour are in `tests/test_b5_gate.py`.
+
+## Addendum: enc1 patch merge isolated on identical operands (2026-10-29)
+
+**No merge defect. The end-to-end merge residual is inherited from the layer's own
+upstream codes. No arithmetic changed; the B5 gate result is unchanged.**
+
+### 1. Question and the operand identity that makes it answerable
+
+Is enc1's patch merge a reconstruction defect, or does its end-to-end residual come
+from the operands it consumes? The merge's operands are recoverable without extra
+instrumentation: the store stage writes `enc8(x2b)` in natural channel order, and the
+merge re-quantizes the same `x2b` with `q8` (`swin_layer_cs.hlsl` Store/Merge,
+`swin_tok.h:1030,1061`), so the layer's output field *is* the merge's input code
+image. [M] For enc1's captured geometry the padded ring the shift removes is exactly
+the part the field does not hold: with `W,H = 480,272`, `sx,sy = 2,2`, the padded grid
+is `488x280`, and every stored merged token reads tokens at `x <= 481`, `y <= 273` —
+inside the field. The probe rejects any geometry where that fails.
+
+### 2. Method
+
+`scripts/m_enc1_merge_probe.py` rebuilds the merge from a capture's own output codes
+and weights with the declared contract: operand order `k = C*q + c` over the four
+source tokens of the 2x2 patch, packed weight columns in natural output-channel order,
+f32 bias as the initial accumulator, **one f16 RNE rounding per 32-product group**,
+clamp to `+-2*pi`, `q8_exact` encoding, and the plane-major stored layout. It also
+runs a second arm that rounds once for the whole 256-product sum (the mathematical
+reference), so the per-k32 rounding is measured rather than assumed.
+
+[M] The probe is not a separate arithmetic: applied to Sette's own output codes it
+reproduces Sette's merge field **100.0000%** (3,134,440 / 3,134,440 codes), so it
+reproduces the shader's path — ordering, permutation, weights, bias, groups, clamp,
+encoding and storage included.
+
+### 3. Results: same operands, four paths
+
+| Path | rebuilt merge from **its own** output codes (per-k32) | differing codes | single-rounding arm |
+|---|---:|---:|---:|
+| Sette HLSL/CPU | 100.0000% | 0 | 99.0457% |
+| Translated original PTX | 99.9481% | 1,627 | 98.8960% |
+| Conservative d4r (canonical) | 99.9667% | 1,045 | 98.9565% |
+
+[M] With identical operands the merge is faithful to 0.03-0.05% of codes: 1,045-1,627
+differing codes, all adjacent-code flips, relative RMS 0.0003-0.0006, maximum 0.0625-
+0.125, no bias (`+1e-6`..`+7e-6`), no saturation and no non-finite values, worst
+channel 99.27-99.54%. The single-rounding arm loses 30-35k codes, so the per-k32
+rounding is a real property of the reference, not an implementation choice.
+
+[M] Selected samples (first mismatch in raster order, first mismatch per 32-channel
+plane, and the first exact token):
+
+| Path | role | merged (y,x) | differing channels |
+|---|---|---:|---:|
+| translated | mismatch | (1, 8) | 2 |
+| translated | plane 0 / plane 1 | (1, 8) | 2 / 2 |
+| translated | plane 2 | (12, 12) | 1 |
+| translated | control | (0, 0) | 0 |
+| canonical | mismatch | (0, 12) | 1 |
+| canonical | plane 0 / plane 1 / plane 2 | (1, 8) / (0, 12) / (6, 0) | 1 / 1 / 1 |
+| Sette | control | (0, 0) | 0 (no mismatch exists) |
+
+### 4. Decomposition of the end-to-end residual
+
+[M] The same layer, three measurements, all on enc1:
+
+| Measurement | exact |
+|---|---:|
+| Sette output codes (= merge operands) vs translated | 96.4183% |
+| merge arithmetic on translated's own operand codes vs translated merge | 99.9481% |
+| Sette merge vs translated merge (end to end) | 89.8379% |
+
+The merge mixes four tokens x 256 products per output, so an operand difference
+reaches up to four merged tokens; the 3.6% operand difference becomes a 10.2% merge
+difference. Conservative shows the same amplification from a smaller starting gap
+(98.4912% operands -> 94.3946% merge). Arithmetic contributes 0.05%.
+
+### 5. Verdict
+
+No reconstruction defect exists in the merge path: ordering, the pair/natural
+permutation, the weight image, the bias, the k32 grouping, the f16 rounding, the
+`+-2*pi` clamp, the e4m3 encoding and the physical store all reproduce the shader and
+match the two original implementations to within adjacent-code flips on identical
+operands. The B5 failure on `enc1.merge` is therefore an **end-to-end propagation**
+result: it measures the layer's upstream operand codes, not the merge. The upstream
+difference is the reconstructed-versus-translated rounding class already documented
+for Q/V K32; this addendum neither reopens nor resolves it.
+
+Consequently P3's condition is not met: there is no source-grounded merge defect to
+correct, and no correction, constant, ordering change or per-token case was
+introduced. The B5 criterion was not changed: `enc1.merge` still fails at 89.8379%
+against 90% and RMS 0.02111 against 0.02, exactly as recorded in the rescope addendum.
+
+### 6. B6 note
+
+B4 remains green (99.9369%, maximum 7 ULP) and its stages are independently validated.
+The ten-layer chain's dec1 field is 21.5728% against the translated chain and 21.3270%
+against the canonical capture, and this addendum shows that its residual is
+propagation of many one-code differences rather than one fixable operator. A B6
+full-frame run built on that chain would therefore produce a frame that cannot yet be
+attributed to a validated neural oracle. B6 needs an explicit decision; it should not
+be started as a continuation of this investigation.
+
+### 7. Reproduction
+
+```powershell
+$T = "$env:LOCALAPPDATA\Temp\opencode"
+python scripts/m_enc1_merge_probe.py `
+  "translated=$T\enc1-translated-20261029-b\capture\replay-000001-rrlite_enc1_4x4" `
+  "canonical=$T\m-capture-run\capture-1080b\replay-000001-rrlite_enc1_4x4" `
+  --sette "$T\m-capture-run\layers\enc1\results" --json "$T\enc1-merge-probe-NEW.json"
+python scripts/m_conformance.py --network --translated-network "$T\translated-layers-20261029-c"
+python -m pytest tests -q
+```
+
+Local evidence: `enc1-merge-probe-20261029/report.json` (all four paths, both
+arithmetic arms, selected tokens with full 96-code rows) and `b4-b5.json`. Regression
+tests: `tests/test_enc1_merge_probe.py` (code lookup, stored-token containment,
+independent loop oracle for the vectorised rebuild, storage round trip, and the
+proof that the k32 group changes the result).

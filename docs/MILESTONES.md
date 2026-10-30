@@ -364,6 +364,25 @@ Establish a deterministic reference execution path.
   channel planes, not a mapping error. B5 therefore stays IN PROGRESS / FAIL,
   with enc1 patch merge as the single open item; no bound was loosened and the
   merge field was not exempted. 222 tests pass, including 14 new gate tests.
+  **enc1 merge root cause (2026-10-29):** the merge path was isolated on identical
+  operands. The store stage writes `enc8(x2b)` and the merge re-quantizes the same
+  values, so the layer's output field is the merge's operand image, and every stored
+  merged token reads only codes that field contains. Rebuilding the declared contract
+  (natural channel order, pair permutation folded into the weights, bias as the
+  initial accumulator, one f16 rounding per k32, `+-2*pi` clamp, `q8_exact`, stored
+  layout) reproduces Sette's merge 100.0000%, the translated merge 99.9481% (1,627
+  codes) and the canonical native merge 99.9667% (1,045 codes), all adjacent-code
+  flips with no bias, saturation or non-finite values. A single-rounding arm loses
+  30-35k codes, confirming the per-k32 rounding. The end-to-end 89.8379% therefore
+  comes from the merge's *operands*: Sette's own output codes are 96.4183% against
+  translated and the merge amplifies that (conservative shows the same amplification,
+  98.4912% -> 94.3946%). There is no merge defect, so no correction was made; the
+  criterion, thresholds and fixtures are untouched and `enc1.merge` still fails at
+  89.8379% / RMS 0.02111. B5 stays IN PROGRESS / FAIL, now with the residual attributed
+  to upstream layer rounding rather than to any named operator. 226 tests pass,
+  including four new merge-contract tests. A B6 full-frame run would inherit the
+  unvalidated chained dec1 (21.5728% against the translated chain) and needs an
+  explicit decision rather than being started as a continuation.
 - [ ] B6 (C21): Full-frame oracle — not started; depends on B4/B5.
 - [ ] B7 (C22): Temporal validation — not started; needs multi-frame capture (the hook overwrites per-launch dumps within a frame, and history resources are image-bound).
 
