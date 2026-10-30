@@ -158,7 +158,26 @@ def _parse_graph(path):
     return resources, stages, dumps
 
 
-def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, enc1_mlp=None):
+def validate_mlp_stages(stages, mode):
+    """Bounded MLP mode gate: reject missing projections and FP16 matrix fallback."""
+    selected = [s for s in stages if s['name'].startswith('enc1.mlp')]
+    expected = [('enc1.mlp-quant', 'swin_q8_quant.cso'), ('enc1.mlp-up', 'swin_mlp_up_q8.cso')]
+    if mode == 'int8-up':
+        expected += [('enc1.mlp', 'swin_mlp_up_epilogue.cso')]
+    elif mode == 'int8-pair':
+        expected += [('enc1.mlp-gelu', 'swin_mlp_gelu.cso'),
+                     ('enc1.mlp-down-quant', 'swin_q8_quant.cso'),
+                     ('enc1.mlp-down', 'swin_mlp_down_q8.cso')]
+    else:
+        raise SystemExit('unsupported MLP mode')
+    actual = [(s['name'], os.path.basename(next(w[1] for w in s['lines'] if w[0] == 'shader')))
+              for s in selected]
+    if actual != expected:
+        raise SystemExit('unexpected MLP stage sequence or matrix shader fallback')
+
+
+def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, enc1_mlp=None,
+                mlp_mode=None):
     """Concatenate the ten layer graphs, remapping every produced field.
 
     A resource `<layer>_<name>` is local to that layer, except the fields named
@@ -177,8 +196,11 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
         if q_int8 or not enc1_mlp:
             raise SystemExit('MLP INT8 requires its own enc1 fixture and cannot combine modes')
         record = json.load(open(os.path.join(enc1_mlp, 'fixture.json')))
-        if record.get('mlp_mode') != 'int8-up' or record.get('q_mode', 'fp16') != 'fp16':
-            raise SystemExit('expected an enc1 INT8-up-only fixture')
+        selected_mlp_mode = record.get('mlp_mode')
+        if selected_mlp_mode not in ('int8-up', 'int8-pair') or record.get('q_mode', 'fp16') != 'fp16':
+            raise SystemExit('expected an enc1 INT8 MLP-only fixture')
+        if mlp_mode is not None and selected_mlp_mode != mlp_mode:
+            raise SystemExit('requested MLP mode does not match its fixture')
         overrides['enc1'] = enc1_mlp
     if q_int8:
         if not enc1_int8:
@@ -262,9 +284,7 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
 
     final = produced['dec1.out']
     if mlp_int8:
-        selected = [s for s in stages if s['name'].startswith('enc1.mlp')]
-        if [s['name'] for s in selected] != ['enc1.mlp-quant', 'enc1.mlp-up', 'enc1.mlp']:
-            raise SystemExit('unexpected MLP-only stage sequence')
+        validate_mlp_stages(stages, selected_mlp_mode)
     lines = ['version 1']
     for r in resources:
         lines.append(f'resource {r["name"]} {r["bytes"]}' +

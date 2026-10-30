@@ -129,11 +129,11 @@ def declared_outputs(stage_txt):
 
 
 def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None,
-                mlp_int8=False, enc1_mlp=None):
+                mlp_int8=False, enc1_mlp=None, mlp_mode=None):
     sys.path.insert(0, str(HERE))
     import m_layer_suite as suite
     info = suite.build_chain(str(layers), str(out), q_int8=q_int8, enc1_int8=enc1_int8,
-                             mlp_int8=mlp_int8, enc1_mlp=enc1_mlp)
+                             mlp_int8=mlp_int8, enc1_mlp=enc1_mlp, mlp_mode=mlp_mode)
     graph = out / 'graph.txt'
     lines = graph.read_text().splitlines()
     replaced = False
@@ -508,15 +508,16 @@ def main():
     ap.add_argument('--enc1-int8', type=Path, default=None,
                     help='enc1 fixture containing the INT8 Q projection')
     ap.add_argument('--dec0-mode', choices=['fp16', 'int8-expansion'], default='fp16')
-    ap.add_argument('--mlp-mode', choices=['fp16', 'int8-up'], default='fp16')
+    ap.add_argument('--mlp-mode', choices=['fp16', 'int8-up', 'int8-pair'], default='fp16')
     ap.add_argument('--enc1-mlp', type=Path, help='enc1 INT8-up-only fixture')
     ap.add_argument('--dec0-frame', type=Path, help='dec0-only raw RGBA16F control')
+    ap.add_argument('--mlpup-frame', type=Path, help='MLP-up-only raw RGBA16F control')
     ap.add_argument('--fp16-frame', type=Path, help='baseline raw RGBA16F frame for direct error')
     ap.add_argument('--enc1q-frame', type=Path, help='enc1-Q-only raw RGBA16F control')
     a = ap.parse_args()
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.mlp_mode != 'fp16' and a.enc1_mlp is None:
-        ap.error('--mlp-mode int8-up needs --enc1-mlp')
+        ap.error('an INT8 MLP mode needs --enc1-mlp')
     FIXTURES, LAYERS = a.fixtures, a.layers
     for path in (a.probe, a.network_probe, a.shaders):
         if not path.exists():
@@ -544,7 +545,8 @@ def main():
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
         build_chain(LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
-                    enc1_int8=a.enc1_int8, mlp_int8=a.mlp_mode == 'int8-up', enc1_mlp=a.enc1_mlp)
+                    enc1_int8=a.enc1_int8, mlp_int8=a.mlp_mode != 'fp16', enc1_mlp=a.enc1_mlp,
+                    mlp_mode=a.mlp_mode)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                           a.shaders, seed=1 if tag == 'repeat' and a.mlp_mode != 'fp16' else 0)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
@@ -633,7 +635,7 @@ def main():
     native_frame = frame(native['frame'])
     report['direct_comparisons'] = {}
     for label, source in [('hybrid-vs-fp16', a.fp16_frame), ('hybrid-vs-enc1q', a.enc1q_frame),
-                          ('hybrid-vs-dec0', a.dec0_frame)]:
+                          ('hybrid-vs-dec0', a.dec0_frame), ('hybrid-vs-mlpup', a.mlpup_frame)]:
         if source is None:
             continue
         base = frame(source)

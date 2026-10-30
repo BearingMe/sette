@@ -636,11 +636,11 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 
 ## M09 — INT8 Kernel Reconstruction
 
-**Status:** IN PROGRESS / PENDING — enc1 Q, dec0 expansion and enc1 MLP up each
-execute as independently validated INT8 modes. The MLP up projection now runs
-inside the real 96-dispatch neural chain and a deterministic full frame
-([EXP-026](experiments/EXP-026-m09-enc1-int8-mlp-up.md)). The representative-layer
-gate remains open; these are not combined modes or a complete INT8 network.
+**Status:** IN PROGRESS / PENDING — enc1's complete MLP pair now executes with
+native INT8 matrices in a 98-dispatch real neural chain and deterministic frame
+([EXP-027](experiments/EXP-027-m09-enc1-int8-mlp-pair.md)). Q-only, dec0-only and
+up-only controls remain unchanged. Full-network cumulative INT8 matrix coverage
+is now the priority; independent modes are not a complete INT8 network.
 
 ### Objective
 
@@ -655,9 +655,10 @@ Implement the neural matrix operations required by Preset M.
   matrices are not fully implemented. The isolated dec0 expansion now also executes
   over all 130,560 rows ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md));
   its original nonlinear/surface stage now consumes that INT8 expansion through
-  an optional GPU-resident prefix (EXP-025); the other matrices remain unchanged.
-  Enc1's full 64×256 MLP up projection now executes with native INT8; GELU, the
-  256×64 down projection and residual arithmetic remain unchanged (EXP-026).
+  an optional GPU-resident prefix (EXP-025); the FP16 default remains unchanged.
+  Enc1's full 64×256 up and 256×64 down projections now execute with native
+  INT8; original GELU/E4M3 and the norm2 residual remain floating-point. Down
+  explicitly uses whole-K INT32, f32 rescale/residual-add, and f16 output (EXP-027).
 - [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
   per-column K-major f32 weights, both quantised to INT8 on the same word layout the
   graph uses. A second path now reads plane-major E4M3 directly on GPU and consumes
@@ -666,6 +667,8 @@ Implement the neural matrix operations required by Preset M.
   layouts and runtime blocked-weight conversion remain open.
   EXP-026 additionally validates enc1's eight blocked W1 chunks/bias vectors and
   supplies a natural-order row-major f16 pre-GELU boundary without host activations.
+  EXP-027 validates all eight W2 chunks and the 256-channel GPU GELU/quantizer
+  boundary, preserving the original row-major x2b output contract.
 - [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric
   INT8 with one scale per activation row and one per output column, zero-row handling,
   clamping and the f16 output boundary are implemented and measured in the graph;
@@ -675,14 +678,18 @@ Implement the neural matrix operations required by Preset M.
   documented; attention's own E4M3 re-quantisation of the Q output is recorded as the
   next boundary, not implemented in INT8. Dec0's E4M3 round-trip and floating-point
   nonlinear/surface epilogue are preserved as explicit exceptions (EXP-025).
-  MLP up adds bias in f32 then writes f16 RNE; original GELU/E4M3 conversion,
-  down k32 accumulation and residual operations remain floating-point (EXP-026).
-- [ ] C05: Validate representative layers. **Open.** One of ten layers has been run
-  with one replaced projection. Dec0 now passes both captured/native-token stage
+  MLP up adds bias in f32 then writes f16 RNE; original GELU/E4M3 and norm2
+  residual remain floating-point. INT8 down replaces the original eight f16 k32
+  accumulator roundings with whole-K integer reduction and one f32 residual add
+  plus f16 RNE store (EXP-027); it is not bit-equivalent FP16 accumulation.
+- [ ] C05: Validate representative layers. **Open.** Enc1 has validated Q-only and
+  MLP-pair INT8 modes; the other nine neural layers remain FP16. Dec0 passes both captured/native-token stage
   comparisons and a dec0-only hybrid frame; EXP-024's deferred C5/C6 boundary is
   resolved in EXP-025. Enc1's MLP up is now CPU/GPU bit-exact in the actual graph,
   with verified original-remainder handoff and full-frame propagation (EXP-026).
-  The MLP down projection and other representative operators remain open.
+  The **enc1 MLP pair is now complete**: both matrices pass CPU/GPU, unchanged
+  GELU/FP16-split checks, native ISA and actual frame handoffs (EXP-027).
+  All-layer coverage and other representative operators remain open.
 - [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
   **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
   with 8/8 independent scalar dot probes agreeing
@@ -690,6 +697,8 @@ Implement the neural matrix operations required by Preset M.
   f32 and f16 outputs also agree exactly, with 48 scalar dot checks (EXP-024).
   MLP up's 34,979,840 accumulators/f32/f16 outputs agree bit for bit, with 48
   scalar dot probes, all-column scalar weight checks and synthetic GPU cases (EXP-026).
+  Down's 8,744,960 accumulators/f32/f16 outputs also agree exactly, with 48
+  scalar probes and nonuniform K=256 GPU edge cases (EXP-027).
 - [x] C07: Inspect generated GPU ISA — 16 `v_dot4_i32_i8` for K = 64 and zero FP16
   matrix instructions in the executed `swin_q8_matmul.cso`
   ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §5); `v_dot4_i32_i8` also
@@ -697,6 +706,8 @@ Implement the neural matrix operations required by Preset M.
   EXP-024 confirms native dot4 and no FP16 matrix fallback in the hashed dec0 shader.
   EXP-026 confirms 16 static dot4 and zero FP16 matrix instructions in the
   executed MLP-up shader, with inspected/executed hashes matched.
+  EXP-027 confirms the same native signed dot4/no-FP16-matrix property in the
+  executed down shader; K=256 loop iterations are not static instruction counts.
 - [x] C08: Measure numerical error before optimization — Q 1.50% relative RMS, enc1
   out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
   for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
@@ -707,25 +718,47 @@ Implement the neural matrix operations required by Preset M.
   13.5094% vs FP16; MLP-only frame 45.9208 dB vs canonical, direct FP16 comparison
   45.4375 dB, 18 deterministic boundaries. All three earlier frame hashes remain
   unchanged; 314 tests pass (EXP-026).
+  Complete pair: same-input down error 2.7956% relative RMS; pair enc1 out/merge
+  5.5981%/7.0224%, chained dec1 13.7555% vs FP16; frame 45.6815 dB vs canonical,
+  45.7754 dB directly vs FP16. All 23 boundaries deterministic; 321 tests pass,
+  all four earlier control hashes unchanged (EXP-027).
 
 ### Validation Gate
 
 Representative reconstructed layers execute correctly on gfx1101 against independent
 CPU INT8 references, and generated ISA confirms the intended native matrix arithmetic.
 
-**PENDING.** Enc1 Q, dec0 expansion and enc1 MLP up are independently integrated
+**PENDING.** Enc1 Q, dec0 expansion and the enc1 MLP pair are independently integrated
 and validated end to end: bit-exact CPU arithmetic, native ISA, original handoffs,
 and deterministic finite hybrid chains/frames. The gate still needs C05: more
-representative complete layer behavior and the MLP down projection.
+representative complete layer behavior and cumulative all-layer matrix coverage.
 The decoder expansion and plane-major operand pass isolated C1–C4 (EXP-024) and
 now feed dec0's typed image outputs and a full hybrid frame (EXP-025). No milestone
-completion is inferred from three independently integrated matrix paths. Temporal
+completion is inferred from these bounded independently integrated paths. Temporal
 fidelity and the existing B5 failure are unchanged.
 
-**Next priority:** systematic matrix-family INT8 coverage in the existing real
-graph toward M10, starting with completing the MLP pair under authorized scope.
-Keep independent CPU/ISA/handoff checks as integration gates rather than creating
-another detached experiment track. No M10 advancement or combined mode is implied.
+### Full INT8 coverage priority
+
+The user has prioritized full INT8 coverage after completing the enc1 MLP pair.
+Grow one cumulative real-network path, not more detached projection modes.
+These are coverage gaps, not claims of complete conversion:
+
+| Matrix family | Established native INT8 coverage | Remaining coverage |
+|---|---|---|
+| MLP up/down | Complete enc1 pair, C=64 | Other nine layers, including C=96/128; cumulative integration |
+| Q / V / Wo | Enc1 Q in its independent mode | V/Wo and all remaining layers; cumulative Q integration |
+| Attention score/value products | None | Q×Q-transpose and probability×V in every layer |
+| Patch merge/expand | dec0 expansion in its independent mode | Encoder merges, decoder expansions and cumulative dec0 integration |
+| Front-end matrix work | Existing FP16 enc0 reconstruction | Audit designated matrix work and convert remaining matrix paths |
+
+Prioritize systematic shape/family support in the existing shaders/executor,
+then cumulative layer/frame execution with an explicit matrix-fallback inventory.
+Each added family still needs independent CPU arithmetic, native ISA tied to
+executed shaders, resource/handoff and determinism gates. Count actual executed
+coverage, not available kernels. Keep nonlinear/normalization/residual exceptions
+explicit. Quality and optimization follow execution completeness; do not divert
+into calibration, FP16 rounding or new backends. Temporal/M10 gates remain separate
+and must not be marked passed from static matrix coverage alone.
 
 ### Expected Deliverables
 

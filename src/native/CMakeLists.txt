@@ -48,6 +48,7 @@ set(SHADERS
 # its own target so the FP16 and reconstruction shaders keep their SM 6.2
 # code generation (and their measured outputs) unchanged.
 set(SHADERS64
+    "swin_mlp_down_q8_cs.hlsl|Down|swin_mlp_down_q8.cso"
     "swin_mlp_up_q8_cs.hlsl|Up|swin_mlp_up_q8.cso"
     "dec0_q8_layout_cs.hlsl|Quantize|dec0_q8_quant.cso"
     "dec0_q8_layout_cs.hlsl|FP16|dec0_expansion_f16.cso"
@@ -60,6 +61,8 @@ set(SHADERS64
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
 # 16bit-types` provides (`(half)` from double is a single conversion).
 set(SHADERS16
+    "swin_mlp_gelu_cs.hlsl|Gelu|swin_mlp_gelu.cso"
+    "swin_mlp_gelu_cs.hlsl|DownFP16|swin_mlp_down_probe.cso"
     "swin_mlp_up_epilogue_cs.hlsl|Mlp|swin_mlp_up_epilogue.cso"
     "swin_mlp_up_probe_cs.hlsl|Up|swin_mlp_up_probe.cso"
     "swin_layer_cs.hlsl|Prepare|swin_prepare.cso"

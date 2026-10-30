@@ -277,9 +277,11 @@ def validate(source,out,capture):
 def audit_frame(stage_dir, frame_dir, fp16_dir, q_dir, dec0_dir, rga):
     """Tie checked stage bytes, executed chain, ISA and unchanged control frames."""
     validation=json.loads((stage_dir/'validation.json').read_text())
+    expected_mode=validation.get('mode','int8-up')
+    hybrid_results=stage_dir/validation.get('hybrid_results','int8-up-results')
     frame=json.loads((frame_dir/'b6.json').read_text())
     checks={'stage_gate':validation['status']=='PASS',
-            'mlp_only':frame['mlp_mode']=='int8-up' and frame['q_mode']==frame['dec0_mode']=='fp16',
+            'mlp_only':frame['mlp_mode']==expected_mode and frame['q_mode']==frame['dec0_mode']=='fp16',
             'frame_execution':frame['execution']['status']=='PASS',
             'deterministic_boundaries':frame['repeat']['fresh'] and frame['repeat']['deterministic']}
     result={'checks':checks,'layer':validation['metrics'],'controls':{},'frame':{
@@ -295,10 +297,10 @@ def audit_frame(stage_dir, frame_dir, fp16_dir, q_dir, dec0_dir, rga):
     gpu=frame_dir/'chain-native-results'
     for p in gpu.glob('*.bin'):
         checks['chain_repeat_'+p.name]=eq.sha(p)==eq.sha(frame_dir/'chain-repeat-results'/p.name)
-    for p in (stage_dir/'int8-up-results').glob('dbg-*.bin'):
+    for p in hybrid_results.glob('dbg-*.bin'):
         checks['frame_handoff_'+p.name]=eq.sha(p)==eq.sha(gpu/('enc1-'+p.name))
     for role in ('out','merge'):
-        checks['frame_enc1_'+role]=eq.sha(stage_dir/'int8-up-results'/f'out-{role}.bin')==eq.sha(gpu/f'out-enc1-{role}.bin')
+        checks['frame_enc1_'+role]=eq.sha(hybrid_results/f'out-{role}.bin')==eq.sha(gpu/f'out-enc1-{role}.bin')
     for tag in ('native','repeat'):
         checks['debug_'+tag]='D3D12 debug: zero error/corruption messages (0 total)' in (
             frame_dir/f'chain-{tag}-results/execution.log').read_text()
@@ -325,7 +327,7 @@ def audit_frame(stage_dir, frame_dir, fp16_dir, q_dir, dec0_dir, rga):
             out.append({'name':s['name'],'lines':rows})
         return out
     checks['all_other_stages_unchanged']=normalized(baseline)==normalized(hybrid)
-    checks['exactly_one_up_projection']=len(hybrid)==len(baseline)+2
+    checks['expected_mlp_stage_count']=len(hybrid)==len(baseline)+(4 if expected_mode=='int8-pair' else 2)
     shaders=ROOT/'build/native'
     for name,digest in validation['shaders'].items():
         checks['shader_'+name]=eq.sha(shaders/name)==digest==frame['inputs']['shaders'][name]
