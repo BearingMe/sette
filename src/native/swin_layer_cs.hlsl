@@ -5,9 +5,10 @@
 // Every binding is a 32-bit-word view of f16 / f32 / e4m3 data, so no byte is
 // reinterpreted by the host.
 //
-// Numerical contract (EXP-006/EXP-017/EXP-019): every 32-product step is
-// accumulated in f32 - the same width as the captured MMA's accumulator - and
-// added to the f16 accumulator with one round-to-nearest-even; every f16
+// Reconstruction contract (EXP-006/EXP-017/EXP-019): each 32-product step uses
+// an exact product sum plus the f16 accumulator, then one RNE half rounding.
+// PTX declares f16 C/D but leaves internal accumulation order/rounding unspecified;
+// this exact model is not a claim of NVIDIA or translated-WMMA bit fidelity. Every f16
 // operation rounds once; the RMS sums use the kernel's own trees; attention uses
 // the clamped cubic, the bit-level exponent and the c^8,c^2,c^4,c^1 butterfly;
 // GELU is the captured cubic; the patch merge clamps to +-2*pi.
