@@ -70,6 +70,8 @@ void WriteFile(const fs::path& path, const void* data, size_t bytes) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("cannot write " + path.string());
     out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    out.flush();
+    if (!out) throw std::runtime_error("incomplete write (check free disk space): " + path.string());
 }
 
 uint32_t Align(uint64_t value) {

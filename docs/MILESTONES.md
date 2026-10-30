@@ -636,11 +636,12 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 
 ## M09 — INT8 Kernel Reconstruction
 
-**Status:** IN PROGRESS / PENDING — enc1's complete MLP pair now executes with
-native INT8 matrices in a 98-dispatch real neural chain and deterministic frame
-([EXP-027](experiments/EXP-027-m09-enc1-int8-mlp-pair.md)). Q-only, dec0-only and
-up-only controls remain unchanged. Full-network cumulative INT8 matrix coverage
-is now the priority; independent modes are not a complete INT8 network.
+**Status:** IN PROGRESS / PENDING — cumulative execution now converts **55/76
+logical matrix operators, 93.8695% of dense shape-weighted MACs** across the real
+ten-layer network and dec0 ([EXP-028](experiments/EXP-028-m09-cumulative-int8.md)).
+All ten layers' Q/V/output projections and MLP pairs, encoder merges and decoder
+expansions are INT8. Enc0 and 20 dynamic QKᵀ/PV products remain FP16 blockers;
+this is not full INT8 coverage. FP16 baseline remains byte-identical.
 
 ### Objective
 
@@ -651,14 +652,16 @@ Implement the neural matrix operations required by Preset M.
 - [ ] C01: Implement INT8 matrix kernels. **Partial:** bounded kernels include the
   standalone GEMM of [EXP-021](experiments/EXP-021-m09-int8-gemm.md) and the in-graph
   Q projection of [EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) (encode + matmul
-  entry points, `dot4add_i8packed`, `cs_6_4`). Attention, MLP and the merge/expand
-  matrices are not fully implemented. The isolated dec0 expansion now also executes
+  entry points, `dot4add_i8packed`, `cs_6_4`). The isolated dec0 expansion also executes
   over all 130,560 rows ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md));
   its original nonlinear/surface stage now consumes that INT8 expansion through
   an optional GPU-resident prefix (EXP-025); the FP16 default remains unchanged.
   Enc1's full 64×256 up and 256×64 down projections now execute with native
   INT8; original GELU/E4M3 and the norm2 residual remain floating-point. Down
   explicitly uses whole-K INT32, f32 rescale/residual-add, and f16 output (EXP-027).
+  EXP-028 reuses these kernels cumulatively for all Q/V/Wo and MLP pairs across
+  ten layers plus both merges/decoder expansions and dec0. No new matrix kernel;
+  enc0 and dynamic attention remain unconverted.
 - [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
   per-column K-major f32 weights, both quantised to INT8 on the same word layout the
   graph uses. A second path now reads plane-major E4M3 directly on GPU and consumes
@@ -669,6 +672,9 @@ Implement the neural matrix operations required by Preset M.
   supplies a natural-order row-major f16 pre-GELU boundary without host activations.
   EXP-027 validates all eight W2 chunks and the 256-channel GPU GELU/quantizer
   boundary, preserving the original row-major x2b output contract.
+  EXP-028 adds and independently validates GPU decoder plane unpack, merge Q8
+  patch gather and original-format merge store. C=64/96/128 and K through 512
+  execute correctly. Enc0's texture/dither feature adapter is still missing.
 - [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric
   INT8 with one scale per activation row and one per output column, zero-row handling,
   clamping and the f16 output boundary are implemented and measured in the graph;
@@ -682,14 +688,19 @@ Implement the neural matrix operations required by Preset M.
   residual remain floating-point. INT8 down replaces the original eight f16 k32
   accumulator roundings with whole-K integer reduction and one f32 residual add
   plus f16 RNE store (EXP-027); it is not bit-equivalent FP16 accumulation.
-- [ ] C05: Validate representative layers. **Open.** Enc1 has validated Q-only and
-  MLP-pair INT8 modes; the other nine neural layers remain FP16. Dec0 passes both captured/native-token stage
+  EXP-028 explicitly retains dynamic attention matrices as unresolved INT8
+  contracts, not justified permanent FP16 exceptions. Nonmatrix softmax,
+  normalization, residuals and reconstruction filtering remain floating-point.
+- [ ] C05: Validate representative layers. **Partial.** Enc1 has validated Q-only and
+  MLP-pair INT8 modes. Dec0 passes both captured/native-token stage
   comparisons and a dec0-only hybrid frame; EXP-024's deferred C5/C6 boundary is
   resolved in EXP-025. Enc1's MLP up is now CPU/GPU bit-exact in the actual graph,
   with verified original-remainder handoff and full-frame propagation (EXP-026).
   The **enc1 MLP pair is now complete**: both matrices pass CPU/GPU, unchanged
   GELU/FP16-split checks, native ISA and actual frame handoffs (EXP-027).
-  All-layer coverage and other representative operators remain open.
+  EXP-028 now validates every learned projection/MLP/merge/expand in the ten-layer
+  cumulative chain, plus live-frame dec0. Dynamic QKᵀ/PV and enc0 still prevent
+  a complete INT8-network/representative-full-layer claim.
 - [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
   **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
   with 8/8 independent scalar dot probes agreeing
@@ -699,6 +710,9 @@ Implement the neural matrix operations required by Preset M.
   scalar dot probes, all-column scalar weight checks and synthetic GPU cases (EXP-026).
   Down's 8,744,960 accumulators/f32/f16 outputs also agree exactly, with 48
   scalar probes and nonuniform K=256 GPU edge cases (EXP-027).
+  EXP-028's final neural batch compares 264,440,320 accumulator/f32/f16 elements
+  bit for bit, all codes/scales and eight scalar probes per operator, plus
+  10,444,800 live dec0 elements. Both sentinel seeds and all layout gates pass.
 - [x] C07: Inspect generated GPU ISA — 16 `v_dot4_i32_i8` for K = 64 and zero FP16
   matrix instructions in the executed `swin_q8_matmul.cso`
   ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §5); `v_dot4_i32_i8` also
@@ -708,6 +722,8 @@ Implement the neural matrix operations required by Preset M.
   executed MLP-up shader, with inspected/executed hashes matched.
   EXP-027 confirms the same native signed dot4/no-FP16-matrix property in the
   executed down shader; K=256 loop iterations are not static instruction counts.
+  EXP-028 confirms native signed dot4/no FP16 matrix fallback for both reused
+  kernels across every cumulative batch, with actual stage/frame hashes checked.
 - [x] C08: Measure numerical error before optimization — Q 1.50% relative RMS, enc1
   out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
   for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
@@ -722,19 +738,26 @@ Implement the neural matrix operations required by Preset M.
   5.5981%/7.0224%, chained dec1 13.7555% vs FP16; frame 45.6815 dB vs canonical,
   45.7754 dB directly vs FP16. All 23 boundaries deterministic; 321 tests pass,
   all four earlier control hashes unchanged (EXP-027).
+  Cumulative Q/V → +Wo → +MLP → +spatial coverage is 20/30/50/55 of 76 operators,
+  16.2928/24.4392/84.7438/93.8695% of MACs. Canonical frames measure
+  44.4441/44.8286/44.2142/44.3779 dB; final direct-vs-FP16 44.9235 dB.
+  All execution/arithmetic gates pass; the unchanged 45 dB B6 image-regression
+  floor fails for every cumulative frame and remains explicitly reported.
+  339 tests pass; B4/B5 and FP16 output are unchanged (EXP-028).
 
 ### Validation Gate
 
 Representative reconstructed layers execute correctly on gfx1101 against independent
 CPU INT8 references, and generated ISA confirms the intended native matrix arithmetic.
 
-**PENDING.** Enc1 Q, dec0 expansion and the enc1 MLP pair are independently integrated
-and validated end to end: bit-exact CPU arithmetic, native ISA, original handoffs,
-and deterministic finite hybrid chains/frames. The gate still needs C05: more
-representative complete layer behavior and cumulative all-layer matrix coverage.
+**PENDING.** The cumulative graph validates all 54 learned matrix operators
+inside the ten neural layers and dec0's expansion: bit-exact CPU arithmetic,
+native ISA, correct handoffs, deterministic finite chains/frames. The complete
+[inventory](experiments/EXP-028-matrix-inventory.json) identifies the remaining
+enc0 embedding and 20 dynamic attention operators; all remain required work.
 The decoder expansion and plane-major operand pass isolated C1–C4 (EXP-024) and
 now feed dec0's typed image outputs and a full hybrid frame (EXP-025). No milestone
-completion is inferred from these bounded independently integrated paths. Temporal
+completion is inferred from cumulative learned-weight coverage alone. Temporal
 fidelity and the existing B5 failure are unchanged.
 
 ### Full INT8 coverage priority
@@ -745,14 +768,16 @@ These are coverage gaps, not claims of complete conversion:
 
 | Matrix family | Established native INT8 coverage | Remaining coverage |
 |---|---|---|
-| MLP up/down | Complete enc1 pair, C=64 | Other nine layers, including C=96/128; cumulative integration |
-| Q / V / Wo | Enc1 Q in its independent mode | V/Wo and all remaining layers; cumulative Q integration |
-| Attention score/value products | None | Q×Q-transpose and probability×V in every layer |
-| Patch merge/expand | dec0 expansion in its independent mode | Encoder merges, decoder expansions and cumulative dec0 integration |
-| Front-end matrix work | Existing FP16 enc0 reconstruction | Audit designated matrix work and convert remaining matrix paths |
+| MLP up/down | All ten pairs, C=64/96/128, cumulative | No learned MLP matrix gap in the reset graph |
+| Q / V / Wo | All ten layers, cumulative | No learned projection gap in the reset graph |
+| Attention score/value products | None; explicitly FP16 | Dynamic RHS layout/scales and score/probability precision contracts for QKᵀ/PV |
+| Patch merge/expand | Both merges, both decoder expansions and dec0, cumulative | No learned spatial matrix gap in the reset graph |
+| Front-end matrix work | Known FP16 enc0 contract; inventory complete | GPU texture/dither feature encoder and field-epilogue handoff for enc0 INT8 |
 
-Prioritize systematic shape/family support in the existing shaders/executor,
-then cumulative layer/frame execution with an explicit matrix-fallback inventory.
+**Next:** close the bounded enc0 adapter gap, then implement GPU dynamic RHS
+encoding/scales and QKᵀ/PV precision boundaries in the same cumulative path.
+The remaining dense workload is 3.0985% enc0 and 3.0320% dynamic attention.
+Do not restart operator reverse engineering or divert into image tuning.
 Each added family still needs independent CPU arithmetic, native ISA tied to
 executed shaders, resource/handoff and determinism gates. Count actual executed
 coverage, not available kernels. Keep nonlinear/normalization/residual exceptions

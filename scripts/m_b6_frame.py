@@ -371,13 +371,16 @@ def input_manifest(a):
         layers[directory.name] = {p.name: sha(p) for p in sorted(directory.iterdir())
                                   if p.is_file()}
     overrides = {}
-    for name in ('enc1_int8', 'enc1_mlp'):
+    for name in ('enc1_int8', 'enc1_mlp', 'cumulative_layers'):
         directory = getattr(a, name, None)
         if directory:
-            overrides[name] = {p.name: sha(p) for p in sorted(directory.iterdir()) if p.is_file()}
+            files = directory.rglob('*') if name == 'cumulative_layers' else directory.iterdir()
+            overrides[name] = {str(p.relative_to(directory)): sha(p)
+                               for p in sorted(files) if p.is_file()}
     return {'probe_sha256': sha(a.probe), 'network_probe_sha256': sha(a.network_probe),
              'enc1_overrides': overrides,
              'mlp_mode': getattr(a, 'mlp_mode', 'fp16'),
+             'cumulative_mode': getattr(a, 'cumulative_mode', 'none'),
              'dec0_mode': getattr(a, 'dec0_mode', 'fp16'),
              'q_mode': getattr(a, 'q_mode', 'fp16'),
             'shaders': {p.name: sha(p) for p in sorted(a.shaders.glob('*.cso'))},
@@ -514,8 +517,24 @@ def main():
     ap.add_argument('--mlpup-frame', type=Path, help='MLP-up-only raw RGBA16F control')
     ap.add_argument('--fp16-frame', type=Path, help='baseline raw RGBA16F frame for direct error')
     ap.add_argument('--enc1q-frame', type=Path, help='enc1-Q-only raw RGBA16F control')
+    ap.add_argument('--cumulative-mode', choices=['none', 'qv', 'output', 'mlp', 'spatial'], default='none')
+    ap.add_argument('--cumulative-layers', type=Path, help='fixed ten-layer cumulative fixtures')
+    ap.add_argument('--previous-frame', type=Path, help='previous accepted cumulative raw frame')
     a = ap.parse_args()
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
+    if a.cumulative_mode == 'none' and a.cumulative_layers:
+        ap.error('--cumulative-layers requires an explicit cumulative mode')
+    if a.cumulative_mode != 'none':
+        if any(m != 'fp16' for m in (a.q_mode, a.dec0_mode, a.mlp_mode)) or not a.cumulative_layers:
+            ap.error('cumulative mode requires its own layer fixtures, not independent precision flags')
+        import m_layer_suite as suite
+        for label in suite.LABELS:
+            record = json.loads((Path(suite.fixture(str(a.cumulative_layers), label)) / 'fixture.json').read_text())
+            if record.get('int8_batch') != a.cumulative_mode:
+                ap.error('cumulative fixture batch does not match requested mode')
+        import m09_cumulative as cumulative
+        cumulative.audit_config(a.cumulative_layers, a.cumulative_mode)
+        if a.cumulative_mode == 'spatial': a.dec0_mode = 'int8-expansion'
     if a.mlp_mode != 'fp16' and a.enc1_mlp is None:
         ap.error('an INT8 MLP mode needs --enc1-mlp')
     FIXTURES, LAYERS = a.fixtures, a.layers
@@ -536,6 +555,7 @@ def main():
               'q_mode': a.q_mode, 'enc1_int8': (str(a.enc1_int8) if a.enc1_int8 else None),
               'dec0_mode': a.dec0_mode,
               'mlp_mode': a.mlp_mode,
+              'cumulative_mode': a.cumulative_mode,
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
               'boundaries': {}, 'missing_outputs': []}
 
@@ -544,11 +564,11 @@ def main():
                    a.shaders)
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
-        build_chain(LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
+        build_chain(a.cumulative_layers or LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
                     enc1_int8=a.enc1_int8, mlp_int8=a.mlp_mode != 'fp16', enc1_mlp=a.enc1_mlp,
                     mlp_mode=a.mlp_mode)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
-                          a.shaders, seed=1 if tag == 'repeat' and a.mlp_mode != 'fp16' else 0)
+                          a.shaders, seed=1 if tag == 'repeat' and (a.mlp_mode != 'fp16' or a.cumulative_mode != 'none') else 0)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None)
@@ -557,6 +577,9 @@ def main():
         hashes = boundary_hashes(full)
         if a.mlp_mode != 'fp16':
             for p in sorted(dec1.parent.glob('enc1-dbg-*.bin')):
+                hashes['chain/' + p.stem] = sha(p)
+        if a.cumulative_mode != 'none':
+            for p in sorted(dec1.parent.glob('out-*.bin')):
                 hashes['chain/' + p.stem] = sha(p)
         return {'tokens': tokens, 'dec1': dec1, 'frame': stages['frame'],
                 'stages': full, 'hashes': hashes,
@@ -635,7 +658,8 @@ def main():
     native_frame = frame(native['frame'])
     report['direct_comparisons'] = {}
     for label, source in [('hybrid-vs-fp16', a.fp16_frame), ('hybrid-vs-enc1q', a.enc1q_frame),
-                          ('hybrid-vs-dec0', a.dec0_frame), ('hybrid-vs-mlpup', a.mlpup_frame)]:
+                          ('hybrid-vs-dec0', a.dec0_frame), ('hybrid-vs-mlpup', a.mlpup_frame),
+                          ('hybrid-vs-previous', a.previous_frame)]:
         if source is None:
             continue
         base = frame(source)

@@ -61,6 +61,9 @@ set(SHADERS64
 # f16 operations with one round-to-nearest-even conversion, which `-enable-
 # 16bit-types` provides (`(half)` from double is a single conversion).
 set(SHADERS16
+    "swin_cumulative_layout_cs.hlsl|Unpack|swin_cumulative_unpack.cso"
+    "swin_cumulative_layout_cs.hlsl|GatherMerge|swin_cumulative_gather.cso"
+    "swin_cumulative_layout_cs.hlsl|MergeStore|swin_cumulative_merge_store.cso"
     "swin_mlp_gelu_cs.hlsl|Gelu|swin_mlp_gelu.cso"
     "swin_mlp_gelu_cs.hlsl|DownFP16|swin_mlp_down_probe.cso"
     "swin_mlp_up_epilogue_cs.hlsl|Mlp|swin_mlp_up_epilogue.cso"

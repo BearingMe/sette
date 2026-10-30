@@ -177,7 +177,7 @@ def validate_mlp_stages(stages, mode):
 
 
 def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, enc1_mlp=None,
-                mlp_mode=None):
+                mlp_mode=None, cumulative_diagnostics=False):
     """Concatenate the ten layer graphs, remapping every produced field.
 
     A resource `<layer>_<name>` is local to that layer, except the fields named
@@ -191,6 +191,7 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
     os.makedirs(out, exist_ok=True)
     resources, stages, dumps = [], [], []
     produced = {}
+    cumulative_aliases = {}
     overrides = {}
     if mlp_int8:
         if q_int8 or not enc1_mlp:
@@ -221,6 +222,11 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
                 if words[0] == 'uav' and words[2] == 'merge':
                     role_resource['merge'] = words[2]
         rename = lambda n: f'{re.sub(r"[^A-Za-z0-9]+", "_", label)}_{n}'
+        if cumulative_diagnostics and record.get('int8_batch'):
+            for d in local_dumps:
+                if d['file'].startswith('dbg-'):
+                    tag = re.sub(r'[^A-Za-z0-9]+', '-', label)
+                    dumps.append(f'dump {rename(d["resource"])} {d["offset"]} {d["bytes"]} {tag}-{d["file"]}')
         if mlp_int8 and label == 'enc1':
             for d in local_dumps:
                 if d['file'].startswith('dbg-'):
@@ -264,8 +270,9 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
                         continue
                     if words[2] == f'{safe}_in' and stage['name'].endswith('.prepare'):
                         words[2] = source
-                    if words[2] == f'{safe}_low' and stage['name'].endswith('.expand'):
+                    if words[2] == f'{safe}_low' and stage['name'].endswith(('.expand', '.expand-unpack')):
                         words[2] = source
+                        cumulative_aliases[f'{safe}_low'] = source
     # decoder skip fields
     for consumer, producer in (('dec2', 'enc2.out'), ('dec1', 'enc1.out')):
         safe = re.sub(r'[^A-Za-z0-9]+', '_', consumer)
@@ -304,7 +311,10 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
     bytes_ = json.load(open(os.path.join(fixture(directory, 'dec1'), 'fixture.json')))[
         'outputs']['out']['bytes']
     lines.append(f'dump {final} 0 {bytes_} out-dec1.bin')
-    lines.extend(dumps)
+    for line in dumps:
+        words = line.split()
+        words[1] = cumulative_aliases.get(words[1], words[1])
+        lines.append(' '.join(words))
     open(os.path.join(out, 'graph.txt'), 'w').write('\n'.join(lines) + '\n')
     print(f'chain: {len(stages)} dispatches, {len(resources)} resources -> {out}')
     return {'stages': len(stages), 'resources': len(resources),
