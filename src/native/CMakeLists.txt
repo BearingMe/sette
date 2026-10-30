@@ -47,6 +47,9 @@ set(SHADERS
 # its own target so the FP16 and reconstruction shaders keep their SM 6.2
 # code generation (and their measured outputs) unchanged.
 set(SHADERS64
+    "dec0_q8_layout_cs.hlsl|Quantize|dec0_q8_quant.cso"
+    "dec0_q8_layout_cs.hlsl|FP16|dec0_expansion_f16.cso"
+    "dec0_q8_matmul_cs.hlsl|main|dec0_q8_matmul.cso"
     "gemm_int8_cs.hlsl|main|gemm_int8_cs.cso"
     "swin_q8_quant_cs.hlsl|Quantize|swin_q8_quant.cso"
     "swin_q8_matmul_cs.hlsl|Matmul|swin_q8_matmul.cso")
@@ -108,6 +111,7 @@ foreach(entry IN LISTS SHADERS64)
         COMMAND "${DXC_EXECUTABLE}" -T cs_6_4 -E "${entrypoint}" -O3
                 "$<IF:$<CONFIG:Debug>,-Zi,-Qstrip_debug>" "${input}" -Fo "${artifact}"
         DEPENDS "${input}" "${CMAKE_CURRENT_SOURCE_DIR}/swin_q8_common.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/dec0_cs.hlsl"
         COMMENT "dxc ${source}:${entrypoint} -> ${output} (cs_6_4)")
     list(APPEND SHADER_OUTPUTS "${artifact}")
 endforeach()

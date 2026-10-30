@@ -637,7 +637,8 @@ Native INT8 execution is demonstrated with independent numerical checks and insp
 ## M09 — INT8 Kernel Reconstruction
 
 **Status:** IN PROGRESS / PENDING — one projection is integrated in the live graph and
-validated bit for bit; the representative-layer gate is still open.
+validated bit for bit; dec0's full physical-layout expansion is independently
+validated in isolation. The representative-layer gate is still open.
 
 ### Objective
 
@@ -645,14 +646,19 @@ Implement the neural matrix operations required by Preset M.
 
 ### Checkpoints
 
-- [ ] C01: Implement INT8 matrix kernels. **Partial:** two kernels exist — the
+- [ ] C01: Implement INT8 matrix kernels. **Partial:** bounded kernels include the
   standalone GEMM of [EXP-021](experiments/EXP-021-m09-int8-gemm.md) and the in-graph
   Q projection of [EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) (encode + matmul
   entry points, `dot4add_i8packed`, `cs_6_4`). Attention, MLP and the merge/expand
-  matrices are not implemented.
+  matrices are not fully implemented. The isolated dec0 expansion now also executes
+  over all 130,560 rows ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md));
+  its nonlinear/surface stage is not integrated with INT8.
 - [ ] C02: Support required tensor layouts. **Partial:** row-major f16 activations and
   per-column K-major f32 weights, both quantised to INT8 on the same word layout the
-  graph uses; the captured plane-major token field is still converted outside a kernel.
+  graph uses. A second path now reads plane-major E4M3 directly on GPU and consumes
+  offline-quantized blocked dec0 weights, with all physical offsets independently
+  checked ([EXP-024](experiments/EXP-024-m09-dec0-int8-expansion.md)). Other required
+  layouts and runtime blocked-weight conversion remain open.
 - [ ] C03: Implement quantization/dequantization boundaries. **Partial:** symmetric
   INT8 with one scale per activation row and one per output column, zero-row handling,
   clamping and the f16 output boundary are implemented and measured in the graph;
@@ -662,18 +668,24 @@ Implement the neural matrix operations required by Preset M.
   documented; attention's own E4M3 re-quantisation of the Q output is recorded as the
   next boundary, not implemented in INT8.
 - [ ] C05: Validate representative layers. **Open.** One of ten layers has been run
-  with one replaced projection.
+  with one replaced projection; dec0's full expansion passes isolated C1–C4, but
+  its complete surface stage is not yet integrated. C5/C6 were deferred at the
+  buffer-graph/texture-runner boundary (EXP-024).
 - [x] C06: Compare outputs against CPU INT8 references — the in-graph Q projection is
   **bit-identical** to the independent CPU INT8 reference (codes, scales and output),
   with 8/8 independent scalar dot probes agreeing
-  ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)).
+  ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md)). Dec0's 10,444,800 integer,
+  f32 and f16 outputs also agree exactly, with 48 scalar dot checks (EXP-024).
 - [x] C07: Inspect generated GPU ISA — 16 `v_dot4_i32_i8` for K = 64 and zero FP16
   matrix instructions in the executed `swin_q8_matmul.cso`
   ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §5); `v_dot4_i32_i8` also
   confirmed for the standalone GEMM ([EXP-021](experiments/EXP-021-m09-int8-gemm.md)).
+  EXP-024 confirms native dot4 and no FP16 matrix fallback in the hashed dec0 shader.
 - [x] C08: Measure numerical error before optimization — Q 1.50% relative RMS, enc1
   out 4.95% / merge 6.11% decoded, chained dec1 13.55%, frame 45.42 dB against 47.05 dB
   for the FP16 path ([EXP-023](experiments/EXP-023-m09-int8-enc1-q.md) §7).
+  Dec0 expansion: 0.5259% relative RMS vs native FP16, zero CPU/GPU implementation
+  error; no dec0 hybrid-frame result is claimed (EXP-024).
 
 ### Validation Gate
 
@@ -683,8 +695,10 @@ CPU INT8 references, and generated ISA confirms the intended native matrix arith
 **PENDING.** One projection of one layer is now integrated and validated end to end —
 bit-exact against the CPU reference, native ISA confirmed, one dispatch replaced, the
 rest of the graph byte-identical, the hybrid chain and frame deterministic and finite.
-The gate needs C05: more representative layers (decoder expansion, the MLP pair, and
-the plane-major token field) and, for each, the same differential treatment.
+The gate needs C05: more representative complete layer behavior and the MLP pair.
+The decoder expansion and plane-major operand now pass isolated C1–C4 (EXP-024);
+connecting that buffer graph to dec0's typed image outputs remains open. No milestone
+completion is inferred from two validated projections.
 
 ### Expected Deliverables
 
