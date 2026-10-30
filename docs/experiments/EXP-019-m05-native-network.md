@@ -953,6 +953,30 @@ Sette, fast and conservative are deterministic across repeats. Sette is not
 distinguishable from d4r's own native replacement by these measures: it is closer on
 tube#3, tube#6, dec2 and dec1 and farther on the rest, always inside the same band.
 
+[M] Sette versus translated, distribution of the differing codes (natural channel
+order; field layouts decoded, not compared as raw offsets):
+
+| Layer | Field | worst channel (id, exact) | channels < 99% | token median / min | worst token (y,x) | worst 8x8 sub-position |
+|---|---|---:|---:|---|---|---:|
+| enc2 | output | 6, 92.98% | 94 | 100% / 39.58% | (1, 238) | 78.16% |
+| enc2 | merge | 29, 74.42% | 122 | 96.88% / 63.28% | (7, 7) | 64.84% |
+| tube#1 | output | 17, 91.21% | 105 | 100% / 53.91% | (8, 7) | 60.32% |
+| tube#2 | output | 96, 89.62% | 118 | 100% / 59.38% | (6, 4) | 61.04% |
+| tube#3 | output | 43, 95.75% | 65 | 100% / 55.47% | (2, 4) | 76.39% |
+| tube#4 | output | 106, 88.28% | 101 | 100% / 52.34% | (63, 3) | 74.56% |
+| tube#5 | output | 9, 87.78% | 119 | 100% / 49.22% | (6, 117) | 75.05% |
+| tube#6 | output | 44, 91.52% | 128 | 100% / 26.56% | (61, 113) | 62.71% |
+| dec2 | output | 5, 91.00% | 96 | 100% / 25.00% | (38, 12) | 80.44% |
+| dec1 | output | 50, 92.92% | 64 | 100% / 20.31% | (226, 55) | 90.58% |
+
+[H] The residual is neither a single-channel defect nor a global offset: every channel
+contributes, at least half of the tokens are fully exact, and the differing codes
+cluster in a minority of tokens whose worst 8x8 sub-position still matches at 60-91%.
+Some worst tokens lie beside a padded/shifted edge (enc2 x=238 of 240 with the grid
+padded to 248; tube#5 x=117 of 120 with the grid padded to 128), which is consistent
+with a boundary operand effect, but that clustering is an observation here, not an
+established cause.
+
 Translation output-field SHA-256 (written regions only):
 enc1 `1d99c4d685458fe50e28b243b5058409ee0a458895e8edeb5e84b2382d29f728`,
 enc2 `9ed07168859727dd2d63413a0ff616f63d05e32a17be0c0fae61c4fe64a79158`,
@@ -1016,6 +1040,11 @@ enc1 input bytes (translated chain dec1 SHA-256
 | dec2 | 19.1203% | 18.5347% | 18.4737% |
 | dec1 | 21.7096% | 21.3270% | 21.5728% |
 
+[M] No chained boundary in any pairing produced a non-finite or saturated code, and
+the largest chained decoded bias is `9.4e-3` (dec2, canonical vs translated); the
+divergence is spread rather than carried by one sign. Chained agreement therefore
+degrades by code-level disagreement, not by systematic saturation or offset.
+
 ### 5. Classification
 
 [M] The local residual is a boundary-requantization residual: ~1-5% of e4m3 codes,
@@ -1037,6 +1066,15 @@ rounding (see the preceding addendum); ZLUDA lowering and AMD instruction-level
 differences remain possible contributors at operator scope and cannot be separated
 from each other or from NVIDIA-hardware rounding without NVIDIA hardware evidence;
 exact internal WMMA rounding stays unresolved.
+
+Limits of this classification: an operator-level divergence was localized only for
+enc1 (the first Q/V K32 step). For the other nine layers this addendum establishes
+scope and magnitude, not the first divergent instruction; doing that would repeat the
+K32 probe per layer. Because the native-versus-translated gap is the same size as the
+Sette-versus-translated gap, that work would at most identify which operator first
+crosses a code boundary, not establish which implementation is correct. The
+quantization-boundary flips themselves cannot be attributed to Sette without NVIDIA
+hardware evidence, and no such evidence exists locally.
 
 ### 6. Gate implications (no threshold changed)
 
