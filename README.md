@@ -51,6 +51,16 @@ twelve changing GPU-resident frames run in one process with live caller textures
 and a caller-owned command list, byte-identical to the standalone reset frame,
 with a 1.17 s one-time initialization and no per-frame allocations or readbacks
 ([EXP-045](docs/experiments/EXP-045-persistent-inference-engine.md)).
+M16-A..G complete the backend-readiness scope: all four frame-varying image
+inputs (encoder colour, post colour, post motion and downsample colour) are
+caller-owned `ID3D12Resource` textures, the output is caller-owned, twelve
+canonical hashes and twelve fresh live-input references match, sixteen negative
+resource cases are rejected explicitly, and the engine records on a borrowed
+command list and caller device/queue without submitting or waiting. The
+one-frame VRAM footprint is unchanged (833.9 MB), the interleaved GPU interval is
+within 0.32% of M15-C, and the 45 dB quality gate is still FAIL
+([EXP-046](docs/experiments/EXP-046-backend-readiness.md)). This is explicitly a
+backend-readiness result, not a pass of the final-quality gate.
 
 ## Trace research workflow
 

@@ -40,7 +40,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
 | M14 | Performance Baseline | COMPLETE (bounded C03) | PASS (bounded; C03 BLOCKED) |
 | M15 | RDNA 3 Optimization | IN PROGRESS | PASS (four: quantizer, memory reuse, MLP fusion, persistent engine) |
-| M16 | Final Quality Gate | NOT STARTED | PENDING |
+| M16 | Final Quality Gate | IN PROGRESS (backend readiness) | PENDING (quality gate) / PASS (scoped backend) |
 
 Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
 reconstruction executes end to end on Windows/D3D12, but the FP16 oracle is not
@@ -1219,6 +1219,35 @@ external-resource conformance and queue/fence ownership tests, not DLL work.
 
 Determine whether the reconstructed INT8 implementation provides a meaningful alternative to FP16 on gfx1101.
 
+### Backend readiness (M16-A..G)
+
+**Status: PASS (explicitly scoped).** See
+[EXP-046](experiments/EXP-046-backend-readiness.md). This is a usability and
+resource-ownership validation of the supported reset frame, not the
+final-quality gate below.
+
+- [x] BR01: Audit the persistent engine and commit M15-C separately
+  (`72ee1f2`); 405 tests, 76/76 coverage, twelve-frame execution and the M09
+  finalizer (17/17) preserved.
+- [x] BR02: Inventory every image-stage GPU input and move post colour, post
+  motion and downsample colour to caller-owned external resources; keep
+  weights and static surfaces immutable.
+- [x] BR03: Validate external resources with sixteen negative cases: format,
+  dimension, array/mip/sample, missing binding, wrong direction, missing UAV
+  flag, foreign device, malformed manifest, safe reuse after rejection.
+- [x] BR04: Execute twelve changing reset frames in one process with all four
+  image inputs caller-owned; 12/12 canonical historical hashes and 12/12 fresh
+  live references, exact recovery, zero debug messages.
+- [x] BR05: Record onto a caller-owned command list and a caller-owned
+  device/queue without closing, executing or waiting on borrowed work; test
+  cancellation and resource lifetime.
+- [x] BR06: Measure initialization (1.13 s), CPU record (1.3-2.0 ms), GPU
+  interval (172.97 ms in a five-round interleaved A/B vs 173.52 ms for M15-C),
+  one-frame DXGI footprint (833.9 MB, unchanged), arena (450.6 MB) and barrier
+  counts.
+- [x] BR07: Record unsupported behavior and the requirements for a future DLL
+  adapter; preserve the 45 dB FAIL verdict and all B4/B5 and finalizer results.
+
 ### Checkpoints
 
 - [ ] C01: Reproduce major experimental results.
@@ -1236,6 +1265,12 @@ Determine whether the reconstructed INT8 implementation provides a meaningful al
 ### Validation Gate
 
 The final report accurately characterizes correctness, fidelity, performance, and reproducibility. A negative performance outcome is acceptable; a failed reconstruction must not be presented as successful.
+
+**Backend-readiness validation: PASS (scoped).** The supported reset frame is
+fully driven by caller-owned GPU resources and records safely on a borrowed
+command list. This does not satisfy the gate below: the original M16 quality,
+fidelity and temporal checkpoints remain PENDING, and the 45 dB verdict remains
+FAIL.
 
 ### Expected Deliverables
 

@@ -176,8 +176,12 @@ def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None, vram=
 
 
 def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None, timing_dir=None,
-                 vram_dir=None):
-    """dec0 -> post -> downsample, with the neural chain's dec1 as dec0's tokens."""
+                 vram_dir=None, image_colour=None):
+    """dec0 -> post -> downsample, with the neural chain's dec1 as dec0's tokens.
+
+    `image_colour` overrides the render colour consumed by post and downsample
+    (an M16 input combination); it never modifies the shared fixture.
+    """
     dec0 = clone_fixture('dec0', out / f'dec0-{tag}')
     shutil.copyfile(dec1, dec0 / 'in-tokens.bin')
     if dec0_mode != 'fp16':
@@ -190,12 +194,21 @@ def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None, ti
     post = clone_fixture('post', out / f'post-{tag}')
     for role in ('gate', 'mix', 'cov'):
         shutil.copyfile(res0 / f'out-{role}.bin', post / f'in-{role}.bin')
+    if image_colour is not None:
+        data = Path(image_colour).read_bytes()
+        expected = (FIXTURES / 'post' / 'in-colour.bin').stat().st_size
+        if len(data) != expected:
+            raise SystemExit(f'--image-colour {image_colour}: {len(data)} bytes, '
+                             f'expected {expected}')
+        (post / 'in-colour.bin').write_bytes(data)
     res1 = run(probe, post / 'stage.txt', post / 'results', shaders,
                timing=(timing_dir / f'post-{tag}.json') if timing_dir else None,
                vram=(vram_dir / f'post-{tag}.json') if vram_dir else None)
 
     down = clone_fixture('downsample', out / f'downsample-{tag}')
     shutil.copyfile(res1 / 'out-packed.bin', down / 'in-src.bin')
+    if image_colour is not None:
+        (down / 'in-colour.bin').write_bytes(data)
     res2 = run(probe, down / 'stage.txt', down / 'results', shaders,
                timing=(timing_dir / f'downsample-{tag}.json') if timing_dir else None,
                vram=(vram_dir / f'downsample-{tag}.json') if vram_dir else None)
@@ -405,6 +418,9 @@ def input_manifest(a):
              'enc1_overrides': overrides,
              'colour': (str(a.colour) if getattr(a, 'colour', None) else None),
              'colour_sha256': (sha(a.colour) if getattr(a, 'colour', None) else None),
+             'image_colour': (str(a.image_colour) if getattr(a, 'image_colour', None) else None),
+             'image_colour_sha256': (sha(a.image_colour)
+                                     if getattr(a, 'image_colour', None) else None),
              'mlp_mode': getattr(a, 'mlp_mode', 'fp16'),
              'cumulative_mode': getattr(a, 'cumulative_mode', 'none'),
              'dec0_mode': getattr(a, 'dec0_mode', 'fp16'),
@@ -527,6 +543,9 @@ def main():
     ap.add_argument('--colour', type=Path, default=None,
                     help='override the enc0 960x540 RGBA16F colour input for this frame '
                          '(temporal sequences); the shared fixture is never modified')
+    ap.add_argument('--image-colour', type=Path, default=None,
+                    help='override the render colour consumed by post and downsample '
+                         '(M16 live input combination); the shared fixture is never modified')
     ap.add_argument('--translated-dec1-capture', type=Path, default=None)
     ap.add_argument('--probe', type=Path,
                     default=REPO / 'build/native/Release/m_image_stage.exe')
@@ -619,6 +638,7 @@ def main():
               'enc0_mode': a.enc0_mode,
               'attention_mode': a.attention_mode,
               'colour': (str(a.colour) if a.colour else None),
+              'image_colour': (str(a.image_colour) if a.image_colour else None),
               'mlp_mode': a.mlp_mode,
               'cumulative_mode': a.cumulative_mode,
               'reused': a.reuse, 'stages': {}, 'paths': {}, 'comparisons': {},
@@ -654,7 +674,8 @@ def main():
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None,
-                              timing_dir=a.timing_dir, vram_dir=a.vram_dir)
+                              timing_dir=a.timing_dir, vram_dir=a.vram_dir,
+                              image_colour=a.image_colour)
         full = {'enc0': {'fixture': enc0_fixture, 'results': enc0},
                 'chain': {'file': dec1}, **stages['stages']}
         hashes = boundary_hashes(full)
@@ -728,7 +749,8 @@ def main():
             'provenance': 'original Preset M PTX translated by ZLUDA, backend=translated, '
                           'dec1 layer only',
             'dec1_sha256': sha(translated)}
-    paths = {name: image_stages(dec1, name, a.out, a.probe, a.shaders)
+    paths = {name: image_stages(dec1, name, a.out, a.probe, a.shaders,
+                                image_colour=a.image_colour)
              for name, dec1 in dec1_fields.items()}
 
     cases = {'native': native, **paths}

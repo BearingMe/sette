@@ -231,22 +231,28 @@ def compose(out, layers, fixtures, fused=True):
     m.resource('dec0_cov', 'tex2d', format='R16G16B16A16_FLOAT', width=960, height=540,
                bytes=960 * 540 * 8)
 
-    # Post inputs that are static reconstruction surfaces, and its outputs.
+    # Post inputs.  The render colour and motion are frame inputs; gate/mix/cov
+    # are produced by dec0 inside this same frame.  The motion texture is bound
+    # but unread on the reset path (post_cs.hlsl documents why), so it remains a
+    # validated external resource rather than a hidden fixture.
     m.resource('post_colour', 'tex2d', format='R16G16B16A16_FLOAT', width=960,
-               height=540, bytes=960 * 540 * 8, init=str(post / 'in-colour.bin'))
+               height=540, bytes=960 * 540 * 8, external=True)
     m.resource('post_gate', 'tex2d', format='R8G8B8A8_UNORM', width=960, height=540,
                bytes=960 * 540 * 4)
     m.resource('post_mix', 'tex2d', format='R8G8B8A8_UNORM', width=960, height=540,
                bytes=960 * 540 * 4)
     m.resource('post_motion', 'tex2d', format='R16G16_FLOAT', width=960, height=540,
-               bytes=960 * 540 * 4, init=str(post / 'in-motion.bin'))
+               bytes=960 * 540 * 4, external=True)
     m.resource('post_packed', 'buffer', bytes=18662400)
     m.resource('post_history', 'tex2d', format='R32_UINT', width=5760, height=1620,
                bytes=5760 * 1620 * 4)
     m.resource('post_half', 'tex2d', format='R32G32B32A32_FLOAT', width=1440, height=810,
                bytes=1440 * 810 * 16)
+    # Downsample reads only the render colour's alpha, but that is still a frame
+    # input; the manifest keeps its own format and role rather than assuming it
+    # matches post's colour binding.
     m.resource('down_colour', 'tex2d', format='R16G16B16A16_FLOAT', width=960,
-               height=540, bytes=960 * 540 * 8, init=str(down / 'in-colour.bin'))
+               height=540, bytes=960 * 540 * 8, external=True)
 
     # --------------------------------------------------------------- stages
     enc0_params = str(enc0 / 'params.bin')

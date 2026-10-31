@@ -10,13 +10,22 @@
 //   Destroy()                    release everything
 //
 // A frame never recompiles a shader, recreates a pipeline, reloads a weight or
-// rebuilds the arena.  Only the resources the caller marks external (a colour
-// texture in, an output texture out) may change between frames.
+// rebuilds the arena.  The reset-frame contract has four caller-owned image
+// inputs and one caller-owned output:
 //
-// The engine is deliberately not a general inference framework: it executes one
-// composed pipeline manifest produced from the accepted fixtures, with the
-// same buffers, formats, dispatch geometry and arithmetic as the accepted
-// graph.  See docs/experiments/EXP-045-persistent-inference-engine.md.
+//   enc0_in_colour  RGBA16F 960x540    encoder render colour
+//   post_colour     RGBA16F 960x540    post render colour
+//   post_motion     RG16F   960x540    post motion (bound, unread on reset)
+//   down_colour     RGBA16F 960x540    downsample colour (alpha only)
+//   frame_out       RGBA16F 1920x1080  output, ALLOW_UNORDERED_ACCESS
+//
+// Weights and the remaining static reconstruction surfaces are immutable model
+// resources loaded once.  The engine is deliberately not a general inference
+// framework: it executes one composed pipeline manifest produced from the
+// accepted fixtures, with the same buffers, formats, dispatch geometry and
+// arithmetic as the accepted graph.  See
+// docs/experiments/EXP-045-persistent-inference-engine.md and
+// docs/experiments/EXP-046-backend-readiness.md.
 #pragma once
 
 #include <windows.h>
@@ -125,6 +134,12 @@ public:
         uint64_t transitions = 0;
         uint64_t uavBarriers = 0;
         uint64_t aliasingBarriers = 0;
+        // Descriptor views rewritten because a caller resource changed.
+        uint64_t externalRebinds = 0;
+        // False for a borrowed list: the engine records but never submits or
+        // waits.  True when the engine owns the queue and executed the frame.
+        bool engineSubmitted = false;
+        bool engineWaited = false;
         double gpuIntervalMs = 0.0;
         bool gpuIntervalValid = false;
         std::vector<double> stageMs;
@@ -193,6 +208,8 @@ public:
     };
     // Zero unless the debug layer was enabled; errors include corruption.
     DebugCounts debugCounts() const;
+    // Stored debug-layer descriptions, in queue order.
+    std::vector<std::string> debugMessages() const;
 
     // Total barriers raised by the last ExecuteFrame, for reporting.
     uint64_t lastTransitions() const { return lastTransitions_; }
@@ -239,7 +256,9 @@ private:
                           D3D12_CPU_DESCRIPTOR_HANDLE handle);
     void CreateTextureView(const EngineBinding& binding, ID3D12Resource* resource,
                            D3D12_CPU_DESCRIPTOR_HANDLE handle);
-    void ValidateExternal(const External& external, const EngineResource& resource);
+    void ValidateExternal(const External& external, const EngineResource& resource,
+                          bool output) const;
+    size_t RebindExternal(const External& external);
 
     void CopyBufferIn(ID3D12Resource* dest, uint64_t offset, const void* data,
                       uint64_t bytes);

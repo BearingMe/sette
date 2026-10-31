@@ -284,6 +284,7 @@ void PersistentEngine::Initialize(const Config& config) {
 void PersistentEngine::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
                                   const Config& config) {
     if (!device) throw std::runtime_error("external device is null");
+    if (!queue) throw std::runtime_error("external initialization requires a caller queue");
     mode_ = config.mode;
     seed_ = config.seed;
     manifest_ = config.manifest;
@@ -296,11 +297,8 @@ void PersistentEngine::Initialize(ID3D12Device* device, ID3D12CommandQueue* queu
     queue_ = queue;
     if (debug_) device_.As(&infoQueue_);
     // An external queue means the engine records on caller lists; it still owns
-    // an allocator and list for initialization uploads.
-    D3D12_COMMAND_QUEUE_DESC qdesc{};
-    qdesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    if (!queue_) Check(device_->CreateCommandQueue(&qdesc, IID_PPV_ARGS(&queue_)),
-                       "CreateCommandQueue");
+    // an allocator and list for initialization uploads.  The queue is borrowed:
+    // the engine never closes or resets it, and Destroy does not drain it.
     Check(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                           IID_PPV_ARGS(&allocator_)),
           "CreateCommandAllocator");
@@ -356,6 +354,7 @@ void PersistentEngine::Destroy() {
     }
     timer_.reset();
     readbacks_.clear();
+    externals_.clear();
     externalSlots_.clear();
     stages_.clear();
     resources_.clear();
@@ -1032,6 +1031,21 @@ void PersistentEngine::DumpDebug() {
     }
 }
 
+std::vector<std::string> PersistentEngine::debugMessages() const {
+    std::vector<std::string> out;
+    if (!infoQueue_) return out;
+    const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        infoQueue_->GetMessage(i, nullptr, &size);
+        std::vector<uint8_t> bytes(size);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+        infoQueue_->GetMessage(i, message, &size);
+        out.emplace_back(message->pDescription ? message->pDescription : "");
+    }
+    return out;
+}
+
 PersistentEngine::DebugCounts PersistentEngine::debugCounts() const {
     DebugCounts out;
     if (!infoQueue_) return out;
@@ -1146,48 +1160,76 @@ ID3D12Resource* PersistentEngine::ResourceFor(const std::string& name) {
 }
 
 void PersistentEngine::ValidateExternal(const External& external,
-                                        const EngineResource& resource) {
+                                        const EngineResource& resource,
+                                        bool output) const {
     if (!external.resource) throw std::runtime_error("null external resource " + external.name);
+    ComPtr<ID3D12Device> owner;
+    if (FAILED(external.resource->GetDevice(IID_PPV_ARGS(&owner))) ||
+        owner.Get() != device_.Get())
+        throw std::runtime_error("external resource belongs to a different device: " +
+                                 external.name);
     const D3D12_RESOURCE_DESC desc = external.resource->GetDesc();
     if (IsTexture(resource)) {
-        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-            desc.Width != resource.width || desc.Height != resource.height ||
-            desc.Format != resource.format)
-            throw std::runtime_error("external texture does not match manifest: " +
+        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+            throw std::runtime_error("external resource is not a texture2d: " + external.name);
+        if (desc.Width != resource.width || desc.Height != resource.height)
+            throw std::runtime_error("external texture dimension does not match manifest: " +
+                                     external.name);
+        if (desc.Format != resource.format)
+            throw std::runtime_error("external texture format does not match manifest: " +
+                                     external.name);
+        if (desc.DepthOrArraySize != 1 || desc.MipLevels != 1 ||
+            desc.SampleDesc.Count != 1 || desc.SampleDesc.Quality != 0)
+            throw std::runtime_error("external texture must have one mip, one array slice and "
+                                     "one sample: " + external.name);
+        if (output && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+            throw std::runtime_error("external output lacks ALLOW_UNORDERED_ACCESS: " +
                                      external.name);
     } else {
-        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
-            desc.Width < resource.bytes)
-            throw std::runtime_error("external buffer does not match manifest: " +
+        if (desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+            throw std::runtime_error("external resource is not a buffer: " + external.name);
+        if (desc.Width < resource.bytes)
+            throw std::runtime_error("external buffer is shorter than the manifest extent: " +
+                                     external.name);
+        if (output && !(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+            throw std::runtime_error("external output buffer lacks ALLOW_UNORDERED_ACCESS: " +
                                      external.name);
     }
 }
 
-void PersistentEngine::SetExternal(const External& external) {
+size_t PersistentEngine::RebindExternal(const External& external) {
     EngineResource& resource = Find(external.name);
     if (!resource.external)
         throw std::runtime_error("resource is not declared external: " + external.name);
-    ValidateExternal(external, resource);
+
+    bool anyOutput = false;
+    for (const ExternalSlot& slot : externalSlots_) {
+        const EngineBinding& binding = stages_[slot.stage].bindings[slot.binding];
+        if (binding.resource == external.name && !binding.input) anyOutput = true;
+    }
+    ValidateExternal(external, resource, anyOutput);
+
     externals_[external.name] = external;
     const UINT stride = device_->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    size_t rebinds = 0;
     for (const ExternalSlot& slot : externalSlots_) {
         const EngineStage& stage = stages_[slot.stage];
         const EngineBinding& binding = stage.bindings[slot.binding];
         if (binding.resource != external.name) continue;
-        if (!binding.input) {
-            const D3D12_RESOURCE_DESC desc = external.resource->GetDesc();
-            if (!(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
-                throw std::runtime_error("external output lacks ALLOW_UNORDERED_ACCESS: " +
-                                         external.name);
-        }
         D3D12_CPU_DESCRIPTOR_HANDLE handle{
             stage.heap->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T(slot.descriptor) * stride};
         if (binding.kind == EngineResource::Kind::Buffer)
             CreateBufferView(binding, external.resource, handle);
         else
             CreateTextureView(binding, external.resource, handle);
+        ++rebinds;
     }
+    return rebinds;
+}
+
+void PersistentEngine::SetExternal(const External& external) {
+    RebindExternal(external);
 }
 
 // --------------------------------------------------------------------------
@@ -1272,6 +1314,49 @@ PersistentEngine::FrameStats PersistentEngine::ExecuteFrame(
     lastTransitions_ = 0;
     lastUavBarriers_ = 0;
     lastAliasingBarriers_ = 0;
+
+    // Validate the complete external set before touching the allocator or the
+    // command list.  A rejected frame therefore leaves the engine reusable and
+    // a borrowed list still open exactly as the caller left it.
+    struct Provided {
+        bool input = false, output = false;
+        const External* external = nullptr;
+    };
+    std::map<std::string, Provided> provided;
+    for (const External& e : request.inputs) {
+        EngineResource& r = Find(e.name);
+        if (!r.external)
+            throw std::runtime_error("resource is not external: " + e.name);
+        ValidateExternal(e, r, false);
+        Provided& p = provided[e.name];
+        p.input = true;
+        p.external = &e;
+    }
+    for (const External& e : request.outputs) {
+        EngineResource& r = Find(e.name);
+        if (!r.external)
+            throw std::runtime_error("resource is not external: " + e.name);
+        ValidateExternal(e, r, true);
+        Provided& p = provided[e.name];
+        p.output = true;
+        p.external = &e;
+    }
+    for (const auto& entry : provided) {
+        if (entry.second.input && entry.second.output)
+            throw std::runtime_error("external resource bound as both input and output: " +
+                                     entry.first);
+    }
+    for (const ExternalSlot& slot : externalSlots_) {
+        const std::string& name = stages_[slot.stage].bindings[slot.binding].resource;
+        auto it = provided.find(name);
+        if (it == provided.end())
+            throw std::runtime_error("external resource is not bound: " + name);
+        const bool wantsOutput = !stages_[slot.stage].bindings[slot.binding].input;
+        if (wantsOutput ? !it->second.output : !it->second.input)
+            throw std::runtime_error("external resource bound in the wrong direction: " +
+                                     name);
+    }
+
     activeList_ = borrowed ? borrowed : list_.Get();
     const bool owns = !borrowed;
     if (owns) {
@@ -1280,15 +1365,9 @@ PersistentEngine::FrameStats PersistentEngine::ExecuteFrame(
     }
 
     auto apply = [&](const External& external) {
-        EngineResource& resource = Find(external.name);
-        if (!resource.external)
-            throw std::runtime_error("resource is not external: " + external.name);
-        if (!external.resource)
-            throw std::runtime_error("null external resource: " + external.name);
-        ValidateExternal(external, resource);
         auto it = externals_.find(external.name);
         if (it == externals_.end() || it->second.resource != external.resource) {
-            SetExternal(external);
+            stats.externalRebinds += RebindExternal(external);
         } else {
             it->second.state = external.state;
         }
@@ -1296,11 +1375,6 @@ PersistentEngine::FrameStats PersistentEngine::ExecuteFrame(
     };
     for (const External& e : request.inputs) apply(e);
     for (const External& e : request.outputs) apply(e);
-    for (const ExternalSlot& slot : externalSlots_) {
-        const std::string& name = stages_[slot.stage].bindings[slot.binding].resource;
-        if (!externals_.count(name) || !externals_[name].resource)
-            throw std::runtime_error("external resource is not bound: " + name);
-    }
 
     const auto f0 = std::chrono::steady_clock::now();
     if (owns && timer_) {
@@ -1393,9 +1467,11 @@ PersistentEngine::FrameStats PersistentEngine::ExecuteFrame(
         CheckDebug(activeList_->Close(), "Close(frame)");
         ID3D12CommandList* lists[] = {activeList_};
         queue_->ExecuteCommandLists(1, lists);
+        stats.engineSubmitted = true;
         Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal(frame)");
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion(frame)");
         WaitForSingleObject(event_, INFINITE);
+        stats.engineWaited = true;
         const auto f2 = std::chrono::steady_clock::now();
         stats.recordMs = Seconds(f0, f1) * 1000.0;
         stats.submitWaitMs = Seconds(f1, f2) * 1000.0;
