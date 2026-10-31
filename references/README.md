@@ -11,7 +11,7 @@ Do not create additional reference indexes without a concrete need.
 
 ## Reference Index
 
-The primary M02 references are pinned: d4r, quattro, NVIDIA DLSS, TransformerEngine, and the local DLL. All four source checkouts were inspected on 2026-10-28; see [`docs/findings/2026-10-28-reference-inventory.md`](../docs/findings/2026-10-28-reference-inventory.md). The DLSS and TransformerEngine checkouts are shallow and sparse, and the DLSS checkout's parent submodule configuration ignores worktree dirt, so inspect it directly before relying on a clean status. References are evidence candidates, not automatically established oracles. Do not silently track upstream `HEAD`.
+The primary M02 references are pinned: d4r, quattro, NVIDIA DLSS, TransformerEngine, and the local DLL. All four M02 source checkouts were inspected on 2026-10-28; see [`docs/findings/2026-10-28-reference-inventory.md`](../docs/findings/2026-10-28-reference-inventory.md). The due DXGI proxy was added on 2026-10-31 for future DLL-adapter work and is reviewed at README, docs, and layout level only; it is not an established oracle. The DLSS and TransformerEngine checkouts are shallow and sparse, and the DLSS checkout's parent submodule configuration ignores worktree dirt, so inspect it directly before relying on a clean status. References are evidence candidates, not automatically established oracles. Do not silently track upstream `HEAD`.
 
 | Reference | Purpose | Origin | Version / Commit / Hash | Local Path / Status |
 |---|---|---|---|---|
@@ -20,6 +20,7 @@ The primary M02 references are pinned: d4r, quattro, NVIDIA DLSS, TransformerEng
 | NVIDIA DLSS | Official product/API material. Availability must not be interpreted as access to Preset M implementation, model, or weights. | <https://github.com/NVIDIA/DLSS> | `9981c6350dc58c0ce21f024fd65e31e851c31689` (`v310.9.16`) | `sources/dlss` submodule; shallow sparse `include/` only. NGX headers and license; no model, weights, or inference runner. |
 | NVIDIA TransformerEngine | NVIDIA FP8/FP4 numerical-recipe context only; relevance to Preset M must be established from separate evidence. | <https://github.com/NVIDIA/TransformerEngine> | `dfc4158d1597f72972fe2863adac436fa3fe1d4d` (main at acquisition, 2026-10-28) | `sources/transformerengine` submodule; shallow sparse `transformer_engine/common/{recipe,cast,include}`. CUDA-only; no DLSS or AMD material. |
 | Local NVIDIA DLL | Local binary and Preset M code evidence; not an extracted or validated weight set. | Original source URL and acquisition provenance unknown; embedded metadata identifies NVIDIA. | SHA-256 `be6e434a94ca32499515eb62ca0e6c274526055d568d0426e4c652dcdfb6ee6e`; raw file/product version `310,7,0,0`. | [`binaries/README.md`](binaries/README.md); DLL is local-only and gitignored. Matches d4r's pinned 310.7.0 artifact; contains `rrlite_*` PTX. Weights not extracted; d4r extraction compatibility unverified. |
+| due DXGI proxy | Structural reference for a future Sette DLL adapter: game-local `dxgi.dll` that forwards the 20 System32 DXGI exports, projects adapter identity, and routes Streamline DLSS ingress to a FidelityFX upscaler. Read for proxy architecture, installation receipts, and security-audit reasoning; not adopted as behavior to reproduce. | <https://github.com/BearingMe/due-dxgi-proxy> | `d2a955d444f85665fe16a7756f5ecfe8bc8ded3a` (`main` at acquisition, 2026-10-31) | `sources/due-dxgi-proxy` submodule; not built or executed here. Windows x64 only; Rust toolchain pinned in its `rust-toolchain.toml`. Nested reference submodules (NGX, Streamline, FidelityFX SDK, OptiScaler) are uninitialized. |
 | AMD GPUOpen | Official AMD documentation discovery point for RDNA 3, D3D12, WMMA, and shader-intrinsic specifications. | <https://gpuopen.com/> | Specific documents/revisions not yet selected. | Not acquired. The RDNA 3 ISA reference is cited by quattro EXP-004 but no local copy is held. |
 | DirectX Shader Compiler | Compiler behavior and shader-model support for the target. | Windows SDK 10.0.26100.0 | DXC `1.8.2502.11` at `Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe` | Present locally; not on `PATH`. Newer standalone DXC for SM 6.9 is not installed. |
 
@@ -50,7 +51,7 @@ Initialize references in an existing checkout:
 git submodule update --init --recursive
 ```
 
-All four source repositories are pinned as read-only submodules and were inspected for M02. The DLSS and TransformerEngine checkouts are shallow and sparse; their omitted subsets are intentional. quattro's nested reference submodules are uninitialized. Do not modify pinned sources; place experiments in project code.
+All four M02 source repositories are pinned as read-only submodules and were inspected for M02. The `due-dxgi-proxy` checkout is pinned for future DLL-adapter work and has not been built. The DLSS and TransformerEngine checkouts are shallow and sparse; their omitted subsets are intentional. quattro's nested reference submodules are uninitialized, as are those of `due-dxgi-proxy`. Do not modify pinned sources; place experiments in project code.
 
 ## Binary References
 

@@ -13,3 +13,6 @@
 	path = references/sources/transformerengine
 	url = https://github.com/NVIDIA/TransformerEngine.git
 	shallow = true
+[submodule "references/sources/due-dxgi-proxy"]
+	path = references/sources/due-dxgi-proxy
+	url = https://github.com/BearingMe/due-dxgi-proxy
