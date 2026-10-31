@@ -46,6 +46,11 @@ arena with byte-identical outputs ([EXP-043](docs/experiments/EXP-043-graph-life
 M15-B fuses the post-MLP GELU with the down-projection quantizer, cutting the
 INT8 chain interval by 13.9% and the full frame by 11.1% without changing any
 accepted hash or diagnostic tensor ([EXP-044](docs/experiments/EXP-044-mlp-gelu-quantizer-fusion.md)).
+M15-C turns the accepted five-stage frame into a persistent in-process engine:
+twelve changing GPU-resident frames run in one process with live caller textures
+and a caller-owned command list, byte-identical to the standalone reset frame,
+with a 1.17 s one-time initialization and no per-frame allocations or readbacks
+([EXP-045](docs/experiments/EXP-045-persistent-inference-engine.md)).
 
 ## Trace research workflow
 

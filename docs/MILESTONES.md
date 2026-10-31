@@ -39,7 +39,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M12 | Weight Quantization Refinement | COMPLETE | PASS |
 | M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
 | M14 | Performance Baseline | COMPLETE (bounded C03) | PASS (bounded; C03 BLOCKED) |
-| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (three accepted: quantizer, memory reuse, MLP fusion) |
+| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (four: quantizer, memory reuse, MLP fusion, persistent engine) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
 Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
@@ -1098,14 +1098,17 @@ claimed as measured. Quality is unchanged (45 dB FAIL).
 
 ## M15 — RDNA 3 Optimization
 
-**Status:** IN PROGRESS / PASS for three accepted optimizations: the 4-lane
-quantizer, production graph memory reuse, and the fused post-MLP
-GELU/down-quantizer. See
+**Status:** IN PROGRESS / PASS for three accepted optimizations and the
+persistent in-process engine: the 4-lane quantizer, production graph memory
+reuse, the fused post-MLP GELU/down-quantizer, and M15-C's persistent engine
+with live GPU resources. See
 [EXP-040](experiments/EXP-040-optimization-results.md) (accepted quantizer),
 [EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking),
 [EXP-043](experiments/EXP-043-graph-lifetime-memory-reuse.md) (lifetimes, arena,
-production mode) and
-[EXP-044](experiments/EXP-044-mlp-gelu-quantizer-fusion.md) (B1-B6 fusion).
+production mode),
+[EXP-044](experiments/EXP-044-mlp-gelu-quantizer-fusion.md) (B1-B6 fusion) and
+[EXP-045](experiments/EXP-045-persistent-inference-engine.md) (M15-C persistent
+engine, external resources, twelve-frame sequence).
 
 ### Objective
 
@@ -1161,13 +1164,30 @@ Improve native INT8 performance without exceeding fidelity limits.
   chain saving (13.9%) against the same-session control, with the accepted
   hashes and 714.8 MB local peak unchanged; the fused stage replaces 42.12 ms
   of GELU+quantizer time with 24.74 ms (EXP-044).
+- [x] C11: Persistent in-process execution and external GPU resources -
+  **M15-C complete**: the accepted five-stage frame is composed into one
+  235-operation pipeline (233 dispatches + 2 format-reinterpreting byte copies)
+  over 715 resources and executed by `m_inference_stage` with one device, one
+  pipeline/descriptor set, one weight set and one 450.6 MB arena. Twelve
+  changing M10 variants run in one process and match their standalone reset
+  references byte for byte; frame 0 is `f76ac032…4d6c00`, the chain tensor is
+  `c89208ed…3c6b0d`, replay of frame 0 recovers exactly, and a caller-owned
+  command list plus caller-owned textures reproduce the same frame. Init is
+  1.17 s, steady-state GPU interval 172.2 ms (1.10 ms CPU record), zero
+  per-frame allocations and zero readbacks. The interleaved M15-B comparison is
+  172.06 -> 171.44 ms (0.4-1.1% across sessions): the gain is removed host,
+  process and allocation work, not GPU arithmetic. The merged full frame uses
+  more local VRAM than the M15-B chain process (833.9 vs 714.8 MB DXGI) because
+  the image stages now coexist, while the production transient peak is
+  unchanged at 376,579,856 B. The M09 finalizer remains 17/17 on the accepted
+  path and the engine's frame/chain are byte-identical to it (EXP-045).
 
 ### Validation Gate
 
 Optimizations provide reproducible end-to-end benefit without violating established correctness/fidelity limits; generated ISA and workload/measurement conditions are recorded.
 
 **PASS for the accepted changes.** The 4-lane quantizer reproduces the accepted
-INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 395
+INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 399
 tests green, and reduces end-to-end INT8 GPU time by ~7-9.5% in the A/B blocks.
 M15-A keeps every accepted FP16/INT8 frame hash, all 13 diagnostic tensors and
 the M09 finalizer (17/17) while cutting the chain's local VRAM 6.5x and its
@@ -1177,9 +1197,17 @@ the down-projection quantizer: the same hashes, all 13 diagnostic tensors, the
 M09 finalizer (17/17, now on a fused diagnostic frame), 76/76 coverage and zero
 D3D12 messages survive a 13.9% chain / 11.1% full-frame interval reduction
 against a same-session control, with the arena and 714.8 MB local peak
-unchanged. No quality, temporal, proxy or DLL work is claimed. M15's next task
-is M15-C: persistent in-process execution with changing inputs and
-external-resource readiness.
+unchanged. M15-C makes the accepted frame a persistent engine: twelve changing
+frames in one process, live caller textures and a caller-owned command list,
+12/12 byte-identical to standalone reset references, exact frame-0 recovery,
+zero per-frame allocations and zero readbacks, 1.17 s one-time init and a
+172.2 ms steady-state GPU interval; the interleaved saving over M15-B is small
+(0.4-1.1%) and is host/process work, not GPU arithmetic. The merged full frame
+uses more local VRAM than the chain process (833.9 vs 714.8 MB) while the
+production transient peak is unchanged. The M09 finalizer remains 17/17 on the
+accepted path, whose frame and chain are byte-identical to the engine's. No
+quality, temporal, proxy or DLL work is claimed. M16 should start with
+external-resource conformance and queue/fence ownership tests, not DLL work.
 
 ---
 
