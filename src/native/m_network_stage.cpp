@@ -36,10 +36,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -86,11 +88,25 @@ uint32_t Align(uint64_t value) {
     return static_cast<uint32_t>((value + kAlignment - 1) & ~uint64_t(kAlignment - 1));
 }
 
+// D3D12 placed-resource offsets must be a multiple of 64 KiB.
+constexpr uint64_t kPlacement = 65536;
+uint64_t AlignPlacement(uint64_t value) {
+    return (value + kPlacement - 1) & ~(kPlacement - 1);
+}
+
+enum class Lifetime { Persistent, Transient, Dedicated, Dead };
+
 struct Resource {
     std::string name;
     uint64_t bytes = 0;
     std::string init;                 // empty = sentinel fill
     ComPtr<ID3D12Resource> gpu;
+    // M15-A lifetime inventory (filled by Analyze).
+    int first = -1, last = -1;
+    bool bound = false, dumped = false, srv = false, uav = false;
+    bool both_states_one_stage = false, reads_before_write = false;
+    Lifetime lifetime = Lifetime::Transient;
+    uint64_t arena_offset = 0, arena_size = 0;
 };
 
 struct Binding {
@@ -124,12 +140,27 @@ struct Graph {
     std::vector<Resource> resources;
     std::vector<Stage> stages;
     std::vector<Dump> dumps;
+    size_t dropped_dumps = 0;
 
     Resource& Find(const std::string& name) {
         for (Resource& r : resources)
             if (r.name == name) return r;
         throw std::runtime_error("unknown resource " + name);
     }
+};
+
+struct ArenaPlan {
+    bool enabled = false;
+    uint64_t heap_bytes = 0;
+    uint64_t persistent_bytes = 0, dedicated_bytes = 0;
+    uint64_t peak_live_bytes = 0, peak_transient_bytes = 0;
+    uint64_t largest_transient_bytes = 0;
+    std::string largest_transient_name;
+    size_t placed = 0, persistent = 0, dedicated = 0, dead = 0, slots = 0;
+};
+
+struct BarrierCounts {
+    uint64_t transition = 0, uav = 0, aliasing = 0;
 };
 
 Graph Parse(const fs::path& manifest) {
@@ -195,6 +226,243 @@ Graph Parse(const fs::path& manifest) {
     return g;
 }
 
+// Production keeps only the final tensor: dumps of the last stage's UAVs, one
+// per resource, preferring the last declared file (`out-dec1.bin` in the
+// accepted chain). Diagnostic keeps every dump.
+void SelectDumps(Graph& g, const std::string& mode) {
+    if (mode != "production") return;
+    std::set<std::string> produced;
+    for (const Binding& b : g.stages.back().bindings)
+        if (!b.input) produced.insert(b.resource);
+    std::vector<Dump> kept;
+    std::set<std::string> seen;
+    for (auto it = g.dumps.rbegin(); it != g.dumps.rend(); ++it)
+        if (produced.count(it->resource) && seen.insert(it->resource).second)
+            kept.push_back(*it);
+    if (kept.empty() && !g.dumps.empty()) kept.push_back(g.dumps.back());
+    std::reverse(kept.begin(), kept.end());
+    g.dropped_dumps = g.dumps.size() - kept.size();
+    g.dumps = std::move(kept);
+}
+
+// First/last use, initialization, access flags and diagnostic classification.
+// A dump is a use after the last dispatch, so a dumped tensor is live to the end
+// of the frame; that is what makes aliasing conservative.
+void Analyze(Graph& g) {
+    const int stages = static_cast<int>(g.stages.size());
+    std::map<std::string, size_t> index;
+    for (size_t i = 0; i < g.resources.size(); ++i) index[g.resources[i].name] = i;
+    std::vector<std::vector<std::pair<std::string, int>>> states(stages);
+    for (int s = 0; s < stages; ++s) {
+        for (const Binding& b : g.stages[s].bindings) {
+            auto it = index.find(b.resource);
+            if (it == index.end())
+                throw std::runtime_error("unknown resource " + b.resource);
+            Resource& r = g.resources[it->second];
+            r.bound = true;
+            r.srv |= b.input;
+            r.uav |= !b.input;
+            r.first = r.first < 0 ? s : std::min(r.first, s);
+            r.last = std::max(r.last, s);
+            states[s].push_back({b.resource, b.input ? 0 : 1});
+        }
+    }
+    for (int s = 0; s < stages; ++s) {
+        std::map<std::string, int> mask;
+        for (const auto& entry : states[s]) mask[entry.first] |= 1 << entry.second;
+        for (const auto& entry : mask)
+            if (entry.second == 3) g.resources[index[entry.first]].both_states_one_stage = true;
+    }
+    for (const Dump& d : g.dumps) {
+        auto it = index.find(d.resource);
+        if (it == index.end()) throw std::runtime_error("dump of unknown resource " + d.resource);
+        Resource& r = g.resources[it->second];
+        r.dumped = true;
+        r.last = std::max(r.last, stages);
+    }
+    for (Resource& r : g.resources) {
+        if (!r.bound && !r.dumped) {
+            // Unbound inputs are placeholders left by the per-layer fixtures;
+            // the chain rewires them to the producer. Do not upload them.
+            r.lifetime = Lifetime::Dead;
+        } else if (!r.init.empty()) {
+            r.lifetime = Lifetime::Persistent;
+            r.first = 0;
+            if (r.last < 0) r.last = 0;
+        } else if (!r.bound) {
+            throw std::runtime_error("dumped resource is never bound or initialized: " + r.name);
+        }
+        if (r.lifetime == Lifetime::Transient && r.first >= 0) {
+            // First use is a write iff the first stage binds it as a UAV.
+            // Binding it as both states in one stage is rejected separately.
+            bool writes = false;
+            for (const Binding& b : g.stages[r.first].bindings)
+                if (b.resource == r.name && !b.input) writes = true;
+            r.reads_before_write = !writes;
+        }
+    }
+}
+
+struct Range {
+    uint64_t offset = 0, size = 0;
+};
+
+void AddFree(std::vector<Range>& free, uint64_t offset, uint64_t size) {
+    if (!size) return;
+    free.push_back({offset, size});
+    std::sort(free.begin(), free.end(),
+              [](const Range& a, const Range& b) { return a.offset < b.offset; });
+    std::vector<Range> merged;
+    for (const Range& r : free) {
+        if (!merged.empty() && r.offset <= merged.back().offset + merged.back().size)
+            merged.back().size = std::max(merged.back().offset + merged.back().size,
+                                          r.offset + r.size) - merged.back().offset;
+        else
+            merged.push_back(r);
+    }
+    free = std::move(merged);
+}
+
+// Static best-fit interval allocation over one DEFAULT heap. Resources are
+// allocated at their first use and freed after their last use; nested lifetimes
+// never share memory. This is deliberately not a general-purpose allocator.
+void PlanArena(Graph& g, ArenaPlan& plan) {
+    const int stages = static_cast<int>(g.stages.size());
+    std::vector<uint64_t> live(stages + 1, 0), transient(stages + 1, 0);
+    for (const Resource& r : g.resources) {
+        if (r.lifetime == Lifetime::Dead || r.first < 0) continue;
+        for (int i = r.first; i <= r.last && i <= stages; ++i) {
+            live[i] += r.bytes;
+            if (r.lifetime != Lifetime::Persistent) transient[i] += r.bytes;
+        }
+    }
+    for (uint64_t v : live) plan.peak_live_bytes = std::max(plan.peak_live_bytes, v);
+    for (uint64_t v : transient) plan.peak_transient_bytes = std::max(plan.peak_transient_bytes, v);
+    if (!plan.enabled) return;
+
+    std::vector<std::vector<Resource*>> starting(stages + 1), ending(stages + 1);
+    for (Resource& r : g.resources) {
+        if (r.lifetime == Lifetime::Persistent) {
+            r.arena_size = AlignPlacement(r.bytes);
+            plan.persistent_bytes += r.arena_size;
+            ++plan.persistent;
+        } else if (r.lifetime == Lifetime::Dead) {
+            ++plan.dead;
+        } else if (!(r.uav && !r.reads_before_write && !r.both_states_one_stage)) {
+            r.lifetime = Lifetime::Dedicated;
+            r.arena_size = AlignPlacement(r.bytes);
+            plan.dedicated_bytes += r.arena_size;
+            ++plan.dedicated;
+        } else {
+            r.arena_size = AlignPlacement(r.bytes);
+            if (r.bytes > plan.largest_transient_bytes) {
+                plan.largest_transient_bytes = r.bytes;
+                plan.largest_transient_name = r.name;
+            }
+            starting[r.first].push_back(&r);
+            ending[r.last].push_back(&r);
+        }
+    }
+    std::vector<Range> free;
+    uint64_t high = 0;
+    for (int i = 0; i <= stages; ++i) {
+        if (i > 0)
+            for (Resource* r : ending[i - 1]) AddFree(free, r->arena_offset, r->arena_size);
+        auto& batch = starting[i];
+        std::sort(batch.begin(), batch.end(), [](const Resource* a, const Resource* b) {
+            if (a->arena_size != b->arena_size) return a->arena_size > b->arena_size;
+            return a->name < b->name;
+        });
+        for (Resource* r : batch) {
+            int best = -1;
+            for (size_t k = 0; k < free.size(); ++k)
+                if (free[k].size >= r->arena_size &&
+                    (best < 0 || free[k].size < free[best].size ||
+                     (free[k].size == free[best].size &&
+                      free[k].offset < free[best].offset)))
+                    best = static_cast<int>(k);
+            if (best >= 0) {
+                r->arena_offset = free[best].offset;
+                free[best].offset += r->arena_size;
+                free[best].size -= r->arena_size;
+                if (!free[best].size) free.erase(free.begin() + best);
+            } else {
+                r->arena_offset = high;
+                high += r->arena_size;
+                ++plan.slots;
+            }
+            ++plan.placed;
+        }
+    }
+    plan.heap_bytes = AlignPlacement(high);
+}
+
+const char* LifetimeName(Lifetime lifetime) {
+    switch (lifetime) {
+        case Lifetime::Persistent: return "persistent";
+        case Lifetime::Transient: return "transient";
+        case Lifetime::Dedicated: return "dedicated";
+        case Lifetime::Dead: return "dead";
+    }
+    return "unknown";
+}
+
+void WriteArenaReport(const std::string& path, const Graph& g, const ArenaPlan& plan,
+                      const std::string& mode, int frames, const BarrierCounts& barriers) {
+    if (path.empty()) return;
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("cannot write " + path);
+    uint64_t declared = 0;
+    for (const Resource& r : g.resources) declared += r.bytes;
+    out << "{\n";
+    out << "  \"mode\": \"" << mode << "\", \"arena_enabled\": "
+        << (plan.enabled ? "true" : "false") << ", \"frames\": " << frames << ",\n";
+    out << "  \"stage_count\": " << g.stages.size() << ", \"resource_count\": "
+        << g.resources.size() << ", \"dumps\": " << g.dumps.size() << ", \"dropped_dumps\": " << g.dropped_dumps
+        << ",\n";
+    out << "  \"declared_bytes\": " << declared << ",\n";
+    out << "  \"arena\": {\"heap_bytes\": " << plan.heap_bytes
+        << ", \"persistent_bytes\": " << plan.persistent_bytes
+        << ", \"dedicated_bytes\": " << plan.dedicated_bytes
+        << ", \"placed_resources\": " << plan.placed
+        << ", \"persistent_resources\": " << plan.persistent
+        << ", \"dedicated_resources\": " << plan.dedicated
+        << ", \"dead_resources\": " << plan.dead
+        << ", \"bump_regions\": " << plan.slots
+        << ", \"peak_live_bytes\": " << plan.peak_live_bytes
+        << ", \"peak_transient_bytes\": " << plan.peak_transient_bytes
+        << ", \"largest_transient_bytes\": " << plan.largest_transient_bytes
+        << ", \"largest_transient_name\": \"" << plan.largest_transient_name << "\""
+        << ", \"utilization\": "
+        << (plan.heap_bytes ? double(plan.peak_transient_bytes) / double(plan.heap_bytes) : 0.0)
+        << "},\n";
+    out << "  \"barriers\": {\"transition\": " << barriers.transition
+        << ", \"uav\": " << barriers.uav
+        << ", \"aliasing\": " << barriers.aliasing << "},\n";
+    out << "  \"resources\": [\n";
+    std::vector<const Resource*> sorted;
+    for (const Resource& r : g.resources) sorted.push_back(&r);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Resource* a, const Resource* b) { return a->name < b->name; });
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        const Resource& r = *sorted[i];
+        out << "    {\"name\": \"" << r.name << "\", \"bytes\": " << r.bytes
+            << ", \"first\": " << r.first << ", \"last\": " << r.last
+            << ", \"lifetime\": \"" << LifetimeName(r.lifetime) << "\""
+            << ", \"offset\": " << r.arena_offset
+            << ", \"aligned_bytes\": " << r.arena_size
+            << ", \"init\": " << (r.init.empty() ? "false" : "true")
+            << ", \"dumped\": " << (r.dumped ? "true" : "false")
+            << ", \"srv\": " << (r.srv ? "true" : "false")
+            << ", \"uav\": " << (r.uav ? "true" : "false")
+            << ", \"both_states_one_stage\": "
+            << (r.both_states_one_stage ? "true" : "false")
+            << ", \"reads_before_write\": " << (r.reads_before_write ? "true" : "false")
+            << "}" << (i + 1 == sorted.size() ? "\n" : ",\n");
+    }
+    out << "  ]\n}\n";
+}
+
 class Runner {
 public:
     Runner() {
@@ -252,36 +520,111 @@ public:
         if (event_) CloseHandle(event_);
     }
 
-    void Run(Graph& g, const fs::path& outputDir, uint32_t seed,
-             const std::string& timingPath, const std::string& vramPath,
-             std::chrono::steady_clock::time_point processStart,
-             std::chrono::steady_clock::time_point parseDone) {
+    struct Options {
+        fs::path outputDir;
+        uint32_t seed = 0;
+        std::string timingPath, vramPath, arenaPath;
+        std::string mode = "diagnostic";
+        int frames = 1;
+        bool arena = false;
+        std::chrono::steady_clock::time_point processStart{}, parseDone{};
+    };
+
+    struct FramePhases {
+        double record = 0.0, wait = 0.0, read = 0.0;
+    };
+
+    void Run(Graph& g, const Options& opt) {
         const auto t0 = std::chrono::steady_clock::now();
 #ifdef M_TIMING
-        if (!vramPath.empty())
+        if (!opt.vramPath.empty())
             vram_ = std::make_unique<vram::Tracker>(adapter_.Get());
 #endif
-        for (Resource& r : g.resources) Create(r, seed);
+        ArenaPlan plan;
+        plan.enabled = opt.arena;
+        PlanArena(g, plan);
+        Initialize(g, opt.seed, plan);
         for (Stage& s : g.stages) Prepare(s, g);
         const auto t1 = std::chrono::steady_clock::now();
 #ifdef M_TIMING
         if (vram_) vram_->Sample("after_load");
 #endif
 
+        FramePhases phases;
+        for (int frame = 0; frame < opt.frames; ++frame) {
+            phases = ExecuteFrame(g, opt, plan, frame);
+            std::printf("frame %d/%d complete\n", frame + 1, opt.frames);
+        }
+
+        // Validation messages may arrive asynchronously; check once the whole
+        // run has drained, so a multi-frame run is covered as well.
+        if (infoQueue_) {
+            const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
+            for (UINT64 i = 0; i < count; ++i) {
+                SIZE_T size = 0;
+                Check(infoQueue_->GetMessage(i, nullptr, &size), "InfoQueue size");
+                std::vector<uint8_t> bytes(size);
+                auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
+                Check(infoQueue_->GetMessage(i, message, &size), "InfoQueue message");
+                if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                    message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)
+                    throw std::runtime_error(std::string("D3D12 validation: ") + message->pDescription);
+                if (message->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
+                    std::printf("D3D12 warning: %s\n", message->pDescription);
+            }
+            std::printf("D3D12 debug: zero error/corruption messages (%llu total)\n", count);
+        }
+        std::printf("graph: %zu stage(s), %zu resource(s), %s mode%s\n", g.stages.size(),
+                    g.resources.size(), opt.mode.c_str(),
+                    plan.enabled ? ", arena" : ", committed");
+#ifdef M_TIMING
+        if (vram_) {
+            const auto t4 = std::chrono::steady_clock::now();
+            vram_->Sample("after_readback");
+            vram::HostPhases report;
+            report.startup_s = Seconds(opt.processStart, opt.parseDone);
+            report.load_alloc_s = Seconds(t0, t1);
+            report.record_s = phases.record;
+            report.execute_wait_s = phases.wait;
+            report.readback_write_s = phases.read;
+            report.total_s = Seconds(opt.processStart, t4);
+            vram_->Host(report);
+            vram_->Write(opt.vramPath);
+        }
+#endif
+        WriteArenaReport(opt.arenaPath, g, plan, opt.mode, opt.frames, barriers_);
+    }
+
+private:
+    FramePhases ExecuteFrame(Graph& g, const Options& opt, const ArenaPlan& plan, int frame) {
+        FramePhases phases;
+        barriers_ = {};
+        const auto f0 = std::chrono::steady_clock::now();
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
 
 #ifdef M_TIMING
         std::unique_ptr<timing::GpuTimer> timer;
-        if (!timingPath.empty())
+        if (!opt.timingPath.empty())
             timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(),
                                                        g.stages.size() + 2);
-#endif
-
-#ifdef M_TIMING
         if (timer) timer->BeginGlobal(list_.Get());
 #endif
         for (Stage& s : g.stages) {
+#ifdef M_TIMING
+            if (timer) timer->Begin(list_.Get());
+#endif
+            // Reusing arena memory for a different logical resource is a D3D12
+            // aliasing transition; a global aliasing barrier is valid for every
+            // switch and keeps the conservative schedule honest.
+            if (plan.enabled) {
+                D3D12_RESOURCE_BARRIER alias{};
+                alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+                alias.Aliasing.pResourceBefore = nullptr;
+                alias.Aliasing.pResourceAfter = nullptr;
+                list_->ResourceBarrier(1, &alias);
+                ++barriers_.aliasing;
+            }
             ID3D12DescriptorHeap* heaps[] = {s.heap.Get()};
             list_->SetDescriptorHeaps(1, heaps);
             list_->SetPipelineState(s.pipeline.Get());
@@ -307,6 +650,7 @@ public:
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             barrier.UAV.pResource = nullptr;
             list_->ResourceBarrier(1, &barrier);
+            ++barriers_.uav;
 #ifdef M_TIMING
             if (timer) timer->Begin(list_.Get());
 #endif
@@ -330,7 +674,8 @@ public:
             list_->CopyBufferRegion(readback.Get(), 0, r.gpu.Get(), d.offset, d.bytes);
             readbacks.push_back(readback);
 #ifdef M_TIMING
-            if (vram_) vram_->Add("readback:" + d.file.string(), Align(d.bytes), "readback");
+            if (vram_ && frame == 0)
+                vram_->Add("readback:" + d.file.string(), Align(d.bytes), "readback");
 #endif
         }
 #ifdef M_TIMING
@@ -347,52 +692,26 @@ public:
         const auto t3 = std::chrono::steady_clock::now();
 
 #ifdef M_TIMING
-        if (timer) timer->Write(timingPath);
+        if (timer && frame + 1 == opt.frames) timer->Write(opt.timingPath);
         if (vram_) vram_->Sample("after_execute");
 #endif
 
-        if (infoQueue_) {
-            const UINT64 count = infoQueue_->GetNumStoredMessagesAllowedByRetrievalFilter();
-            for (UINT64 i = 0; i < count; ++i) {
-                SIZE_T size = 0;
-                Check(infoQueue_->GetMessage(i, nullptr, &size), "InfoQueue size");
-                std::vector<uint8_t> bytes(size);
-                auto* message = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
-                Check(infoQueue_->GetMessage(i, message, &size), "InfoQueue message");
-                if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
-                    message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)
-                    throw std::runtime_error(std::string("D3D12 validation: ") + message->pDescription);
-                if (message->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
-                    std::printf("D3D12 warning: %s\n", message->pDescription);
-            }
-            std::printf("D3D12 debug: zero error/corruption messages (%llu total)\n", count);
-        }
-        fs::create_directories(outputDir);
+        const fs::path directory =
+            opt.frames > 1 ? opt.outputDir / ("frame-" + std::to_string(frame)) : opt.outputDir;
+        fs::create_directories(directory);
         for (size_t i = 0; i < g.dumps.size(); ++i) {
             void* mapped = nullptr;
             Check(readbacks[i]->Map(0, nullptr, &mapped), "Map(readback)");
-            WriteFile(outputDir / g.dumps[i].file, mapped, g.dumps[i].bytes);
+            WriteFile(directory / g.dumps[i].file, mapped, g.dumps[i].bytes);
             readbacks[i]->Unmap(0, nullptr);
             std::printf("wrote %s (%llu bytes)\n", g.dumps[i].file.string().c_str(),
                         static_cast<unsigned long long>(g.dumps[i].bytes));
         }
-        std::printf("graph: %zu stage(s), %zu resource(s)\n", g.stages.size(),
-                    g.resources.size());
-#ifdef M_TIMING
-        if (vram_) {
-            const auto t4 = std::chrono::steady_clock::now();
-            vram_->Sample("after_readback");
-            vram::HostPhases phases;
-            phases.startup_s = vram::Tracker::Seconds(processStart, parseDone);
-            phases.load_alloc_s = vram::Tracker::Seconds(t0, t1);
-            phases.record_s = vram::Tracker::Seconds(t1, t2);
-            phases.execute_wait_s = vram::Tracker::Seconds(t2, t3);
-            phases.readback_write_s = vram::Tracker::Seconds(t3, t4);
-            phases.total_s = vram::Tracker::Seconds(processStart, t4);
-            vram_->Host(phases);
-            vram_->Write(vramPath);
-        }
-#endif
+        const auto t4 = std::chrono::steady_clock::now();
+        phases.record = Seconds(f0, t2);
+        phases.wait = Seconds(t2, t3);
+        phases.read = Seconds(t3, t4);
+        return phases;
     }
 
 private:
@@ -403,8 +722,7 @@ private:
         return n;
     }
 
-    void Transition(Resource& r, D3D12_RESOURCE_STATES to) {
-        ID3D12Resource* key = r.gpu.Get();
+    void TransitionRaw(ID3D12Resource* key, D3D12_RESOURCE_STATES to) {
         auto it = states_.find(key);
         D3D12_RESOURCE_STATES from =
             it == states_.end() ? D3D12_RESOURCE_STATE_COMMON : it->second;
@@ -416,57 +734,151 @@ private:
         barrier.Transition.StateBefore = from;
         barrier.Transition.StateAfter = to;
         list_->ResourceBarrier(1, &barrier);
+        ++barriers_.transition;
         states_[key] = to;
     }
 
-    void Create(Resource& r, uint32_t seed) {        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    void Transition(Resource& r, D3D12_RESOURCE_STATES to) {
+        if (!r.gpu) throw std::runtime_error("transition of unallocated resource " + r.name);
+        TransitionRaw(r.gpu.Get(), to);
+    }
+
+    static D3D12_RESOURCE_DESC BufferDesc(uint64_t bytes) {
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = r.bytes;
+        desc.Width = bytes;
         desc.Height = 1;
         desc.DepthOrArraySize = 1;
         desc.MipLevels = 1;
         desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                               IID_PPV_ARGS(&r.gpu)),
-              "CreateCommittedResource");
-#ifdef M_TIMING
-        if (vram_) {
-            vram_->Add(r.name, r.bytes, "default");
-            vram_->Transient(r.bytes);
-        }
-#endif
-        std::vector<uint8_t> init(static_cast<size_t>(r.bytes));
-        if (!r.init.empty()) {
-            init = ReadFile(fs::path(r.init));
-            if (init.size() != r.bytes) throw std::runtime_error("init size for " + r.name);
-        } else {
-            for (size_t i = 0; i < init.size(); ++i)
-                init[i] = static_cast<uint8_t>((i * 37u + 11u + seed * 97u) & 0xFFu);
-        }
+        return desc;
+    }
+
+    static double Seconds(std::chrono::steady_clock::time_point a,
+                          std::chrono::steady_clock::time_point b) {
+        return std::chrono::duration<double>(b - a).count();
+    }
+
+    // Uploads are batched: one submit per 64 MiB instead of one per resource.
+    static constexpr uint64_t kUploadBatch = 64ull << 20;
+
+    void CopyIn(ID3D12Resource* dest, uint64_t offset, const void* data, uint64_t bytes) {
+        if (!bytes) return;
         D3D12_HEAP_PROPERTIES up{};
         up.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC ud = desc;
-        ud.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_RESOURCE_DESC desc = BufferDesc(Align(bytes));
+        desc.Flags = D3D12_RESOURCE_FLAG_NONE;
         ComPtr<ID3D12Resource> upload;
-        Check(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
-                                               D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+        Check(device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &desc,
+                                                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                IID_PPV_ARGS(&upload)),
               "CreateCommittedResource(upload)");
         void* mapped = nullptr;
         Check(upload->Map(0, nullptr, &mapped), "Map(upload)");
-        std::memcpy(mapped, init.data(), init.size());
+        std::memcpy(mapped, data, static_cast<size_t>(bytes));
         upload->Unmap(0, nullptr);
+        TransitionRaw(dest, D3D12_RESOURCE_STATE_COPY_DEST);
+        list_->CopyBufferRegion(dest, offset, upload.Get(), 0, bytes);
+        uploads_.push_back(upload);
+        pending_upload_ += Align(bytes);
+#ifdef M_TIMING
+        if (vram_) vram_->Transient(pending_upload_);
+#endif
+        if (pending_upload_ >= kUploadBatch) FlushUploads();
+    }
 
+    void FlushUploads() {
+        if (uploads_.empty()) return;
+        Check(list_->Close(), "Close(init batch)");
+        ID3D12CommandList* lists[] = {list_.Get()};
+        queue_->ExecuteCommandLists(1, lists);
+        Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
+        Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
+        WaitForSingleObject(event_, INFINITE);
+        uploads_.clear();
+        pending_upload_ = 0;
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
-        Transition(r, D3D12_RESOURCE_STATE_COPY_DEST);
-        list_->CopyBufferRegion(r.gpu.Get(), 0, upload.Get(), 0, r.bytes);
-        Transition(r, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    void Initialize(Graph& g, uint32_t seed, const ArenaPlan& plan) {
+        Check(allocator_->Reset(), "Reset(allocator)");
+        Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
+        if (plan.enabled && plan.heap_bytes) {
+            D3D12_HEAP_DESC hd{};
+            hd.SizeInBytes = plan.heap_bytes;
+            hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+            hd.Properties.CreationNodeMask = 1;
+            hd.Properties.VisibleNodeMask = 1;
+            hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+            Check(device_->CreateHeap(&hd, IID_PPV_ARGS(&arena_heap_)), "CreateHeap");
+#ifdef M_TIMING
+            if (vram_) vram_->Add("arena-heap", plan.heap_bytes, "default");
+#endif
+            // One resource spans the heap so a single seed-dependent sentinel
+            // fill covers every transient slot. An unwritten read is visible.
+            D3D12_RESOURCE_DESC canary = BufferDesc(plan.heap_bytes);
+            Check(device_->CreatePlacedResource(arena_heap_.Get(), 0, &canary,
+                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                IID_PPV_ARGS(&arena_canary_)),
+                  "CreatePlacedResource(canary)");
+            std::vector<uint8_t> chunk(8u << 20);
+            for (uint64_t offset = 0; offset < plan.heap_bytes; offset += chunk.size()) {
+                const uint64_t n = std::min<uint64_t>(chunk.size(), plan.heap_bytes - offset);
+                for (uint64_t i = 0; i < n; ++i)
+                    chunk[i] = static_cast<uint8_t>(
+                        ((offset + i) * 37u + 11u + seed * 97u) & 0xFFu);
+                CopyIn(arena_canary_.Get(), offset, chunk.data(), n);
+            }
+            TransitionRaw(arena_canary_.Get(), D3D12_RESOURCE_STATE_COMMON);
+        }
+        for (Resource& r : g.resources) {
+            if (r.lifetime == Lifetime::Dead) {
+                r.gpu.Reset();
+                continue;
+            }
+            if (plan.enabled && r.lifetime == Lifetime::Transient) {
+                D3D12_RESOURCE_DESC desc = BufferDesc(r.arena_size);
+                Check(device_->CreatePlacedResource(arena_heap_.Get(), r.arena_offset, &desc,
+                                                    D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                    IID_PPV_ARGS(&r.gpu)),
+                      "CreatePlacedResource");
+                continue;
+            }
+            // Persistent and dedicated resources, and every resource when the
+            // arena is off, are committed: contents survive across frames.
+            D3D12_HEAP_PROPERTIES heap{};
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC desc = BufferDesc(r.bytes);
+            Check(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                   IID_PPV_ARGS(&r.gpu)),
+                  "CreateCommittedResource");
+#ifdef M_TIMING
+            if (vram_) {
+                const char* heap_name = r.lifetime == Lifetime::Persistent ? "persistent"
+                                       : r.lifetime == Lifetime::Dedicated ? "dedicated"
+                                                                           : "default";
+                vram_->Add(r.name, r.bytes, heap_name);
+            }
+#endif
+            std::vector<uint8_t> init(static_cast<size_t>(r.bytes));
+            if (!r.init.empty()) {
+                init = ReadFile(fs::path(r.init));
+                if (init.size() != r.bytes) throw std::runtime_error("init size for " + r.name);
+            } else {
+                for (size_t i = 0; i < init.size(); ++i)
+                    init[i] = static_cast<uint8_t>((i * 37u + 11u + seed * 97u) & 0xFFu);
+            }
+            CopyIn(r.gpu.Get(), 0, init.data(), r.bytes);
+            Transition(r, D3D12_RESOURCE_STATE_COMMON);
+        }
+        FlushUploads();
+        // Execute any trailing transition even if the last CopyIn triggered a
+        // flush; otherwise a persistent resource would be left in COPY_DEST
+        // while the host believes it is COMMON.
         Check(list_->Close(), "Close(init)");
         ID3D12CommandList* lists[] = {list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
@@ -605,6 +1017,11 @@ private:
     uint64_t fenceValue_ = 0;
     std::map<ID3D12Resource*, D3D12_RESOURCE_STATES> states_;
     ComPtr<IDXGIAdapter1> adapter_;
+    ComPtr<ID3D12Heap> arena_heap_;
+    ComPtr<ID3D12Resource> arena_canary_;
+    BarrierCounts barriers_;
+    std::vector<ComPtr<ID3D12Resource>> uploads_;
+    uint64_t pending_upload_ = 0;
 #ifdef M_TIMING
     std::unique_ptr<vram::Tracker> vram_;
 #endif
@@ -613,32 +1030,55 @@ private:
 int Run(int argc, char** argv) {
     const auto processStart = std::chrono::steady_clock::now();
     fs::path manifest, outputDir = ".", shaderDir;
-    std::string timingPath, vramPath;
+    std::string timingPath, vramPath, arenaPath, mode = "diagnostic";
     uint32_t seed = 0;
+    int frames = 1;
+    bool arena = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--graph" && i + 1 < argc) manifest = argv[++i];
         else if (arg == "--out" && i + 1 < argc) outputDir = argv[++i];
         else if (arg == "--shaders" && i + 1 < argc) shaderDir = argv[++i];
         else if (arg == "--seed" && i + 1 < argc) seed = static_cast<uint32_t>(std::stoul(argv[++i]));
+        else if (arg == "--mode" && i + 1 < argc) mode = argv[++i];
+        else if (arg == "--frames" && i + 1 < argc) frames = std::stoi(argv[++i]);
+        else if (arg == "--arena") arena = true;
+        else if (arg == "--arena-report" && i + 1 < argc) arenaPath = argv[++i];
 #ifdef M_TIMING
         else if (arg == "--timing" && i + 1 < argc) timingPath = argv[++i];
         else if (arg == "--vram" && i + 1 < argc) vramPath = argv[++i];
 #endif
         else throw std::runtime_error("unknown option " + arg);
     }
+    if (mode != "production" && mode != "diagnostic")
+        throw std::runtime_error("--mode must be production or diagnostic");
+    if (frames < 1) throw std::runtime_error("--frames must be at least 1");
     if (manifest.empty()) {
         std::fprintf(stderr, "usage: m_network_stage --graph graph.txt [--out DIR] "
-                             "[--shaders DIR] [--seed N]\n");
+                             "[--shaders DIR] [--seed N] [--mode production|diagnostic] "
+                             "[--arena] [--frames N] [--arena-report FILE]\n");
         return 2;
     }
     Graph graph = Parse(manifest);
-    const auto parseDone = std::chrono::steady_clock::now();
     // shader paths that are just a file name resolve against --shaders
     for (Stage& s : graph.stages)
         if (!fs::exists(s.shader) && !shaderDir.empty()) s.shader = shaderDir / s.shader.filename();
+    SelectDumps(graph, mode);
+    Analyze(graph);
+    const auto parseDone = std::chrono::steady_clock::now();
     Runner runner;
-    runner.Run(graph, outputDir, seed, timingPath, vramPath, processStart, parseDone);
+    Runner::Options options;
+    options.outputDir = outputDir;
+    options.seed = seed;
+    options.timingPath = timingPath;
+    options.vramPath = vramPath;
+    options.arenaPath = arenaPath;
+    options.mode = mode;
+    options.frames = frames;
+    options.arena = arena;
+    options.processStart = processStart;
+    options.parseDone = parseDone;
+    runner.Run(graph, options);
     return 0;
 }
 

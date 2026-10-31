@@ -155,13 +155,18 @@ def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None,
     return info
 
 
-def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None, vram=None):
+def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None, vram=None,
+              mode='diagnostic', arena=False):
     command = [str(network_probe), '--graph', str(chain_dir / 'graph.txt'),
-               '--out', str(out), '--shaders', str(shaders), '--seed', str(seed)]
+               '--out', str(out), '--shaders', str(shaders), '--seed', str(seed),
+               '--mode', mode]
+    if arena:
+        command += ['--arena']
     if timing is not None:
         command += ['--timing', str(timing)]
     if vram is not None:
         command += ['--vram', str(vram)]
+        command += ['--arena-report', str(Path(vram).with_name(Path(vram).stem + '-arena.json'))]
     done = subprocess.run(command, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f'chain: {done.stdout[-600:]}{done.stderr[-600:]}')
@@ -551,6 +556,10 @@ def main():
                     help='ask each probe for D3D12 GPU timestamps (requires the *_timed binaries)')
     ap.add_argument('--vram-dir', type=Path, default=None,
                     help='ask each probe for allocation/VRAM and host-phase JSON (requires the *_timed binaries)')
+    ap.add_argument('--network-mode', choices=['diagnostic', 'production'], default='diagnostic',
+                    help='neural graph mode: all dumps, or only the final tensor')
+    ap.add_argument('--network-arena', action='store_true',
+                    help='reuse transient neural buffers from a bounded placed-resource arena')
     a = ap.parse_args()
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.cumulative_mode == 'none' and a.cumulative_layers:
@@ -637,7 +646,8 @@ def main():
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                           a.shaders, seed=1 if tag == 'repeat' and (a.mlp_mode != 'fp16' or a.cumulative_mode != 'none') else 0,
                           timing=(a.timing_dir / f'chain-{tag}.json') if a.timing_dir else None,
-                          vram=(a.vram_dir / f'chain-{tag}.json') if a.vram_dir else None)
+                          vram=(a.vram_dir / f'chain-{tag}.json') if a.vram_dir else None,
+                          mode=a.network_mode, arena=a.network_arena)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None,

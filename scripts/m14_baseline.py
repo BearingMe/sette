@@ -50,14 +50,21 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def run_mode(mode, out, layers):
+def run_mode(mode, out, layers, network_mode='diagnostic', network_arena=False):
     timing = out / 'timing'
     vram = out / 'vram'
     command = [sys.executable, str(HERE / 'm_b6_frame.py'), '--out', str(out),
                '--no-repeat',
                '--probe', str(REPO / 'build/native/Release/m_image_stage_timed.exe'),
                '--network-probe', str(REPO / 'build/native/Release/m_network_stage_timed.exe'),
-               '--timing-dir', str(timing), '--vram-dir', str(vram), *MODES[mode]]
+               '--timing-dir', str(timing), '--vram-dir', str(vram),
+               '--network-mode', network_mode, *MODES[mode]]
+    if network_arena:
+        # The arena pays off on the INT8 chain's 4.39 GB working set. The FP16
+        # chain is ~0.76 GB and the extra aliasing barriers cost ~1%, so the
+        # production policy keeps FP16 on committed buffers.
+        if mode != 'fp16':
+            command.append('--network-arena')
     if mode != 'fp16':
         command += ['--cumulative-layers', str(layers)]
     started = time.perf_counter()
@@ -143,20 +150,26 @@ def main():
                     default=TEMP / 'm09h-complete-chain-20261030' / 'layers')
     ap.add_argument('--repeats', type=int, default=3)
     ap.add_argument('--warmup', type=int, default=1)
+    ap.add_argument('--network-mode', choices=['diagnostic', 'production'],
+                    default='diagnostic')
+    ap.add_argument('--network-arena', action='store_true')
     a = ap.parse_args()
     if a.out.exists():
         raise SystemExit(f'{a.out} exists; use a fresh directory')
     a.out.mkdir(parents=True)
     report = {'repeats': a.repeats, 'warmup': a.warmup,
               'layers': str(a.cumulative_layers), 'accepted': ACCEPTED,
+              'network_mode': a.network_mode, 'network_arena': a.network_arena,
               'runs': {}, 'comparison': {}, 'status': 'running'}
     for mode in ('fp16', 'int8'):
         for warm in range(a.warmup):
-            run_mode(mode, a.out / mode / f'warm-{warm:02d}', a.cumulative_layers)
+            run_mode(mode, a.out / mode / f'warm-{warm:02d}', a.cumulative_layers,
+                     a.network_mode, a.network_arena)
             print(f'{mode} warmup {warm} done', flush=True)
     for repeat in range(a.repeats):
         for mode in ('fp16', 'int8'):
-            row = run_mode(mode, a.out / mode / f'run-{repeat:02d}', a.cumulative_layers)
+            row = run_mode(mode, a.out / mode / f'run-{repeat:02d}', a.cumulative_layers,
+                           a.network_mode, a.network_arena)
             report['runs'].setdefault(mode, []).append({
                 'repeat': repeat, 'wall_seconds': row['wall_seconds'],
                 'frame_sha256': row['frame_sha256'],

@@ -41,7 +41,8 @@ is accepted as an opt-in configuration, raising the canonical frame to 44.4026 d
 with 76/76 INT8 operators ([EXP-041](docs/experiments/EXP-041-quality-recovery.md));
 the 45 dB gate still fails. M14 now has a reproducible GPU-interval baseline,
 host-phase and VRAM measurements ([EXP-042](docs/experiments/EXP-042-performance-baseline.md));
-M15 is prepared but not implemented.
+M15-A adds a production/diagnostic graph split and a bounded placed-resource
+arena with byte-identical outputs ([EXP-043](docs/experiments/EXP-043-graph-lifetime-memory-reuse.md)).
 
 ## Trace research workflow
 

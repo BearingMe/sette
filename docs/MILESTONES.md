@@ -39,7 +39,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M12 | Weight Quantization Refinement | COMPLETE | PASS |
 | M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
 | M14 | Performance Baseline | COMPLETE (bounded C03) | PASS (bounded; C03 BLOCKED) |
-| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (bounded) |
+| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (two accepted: quantizer, memory reuse) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
 Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
@@ -1098,10 +1098,12 @@ claimed as measured. Quality is unchanged (45 dB FAIL).
 
 ## M15 — RDNA 3 Optimization
 
-**Status:** IN PROGRESS / PASS for one accepted optimization, **prepared** for
-the M14-selected candidates. See
-[EXP-040](experiments/EXP-040-optimization-results.md) (accepted quantizer) and
-[EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking).
+**Status:** IN PROGRESS / PASS for two accepted optimizations: the 4-lane
+quantizer and production graph memory reuse. See
+[EXP-040](experiments/EXP-040-optimization-results.md) (accepted quantizer),
+[EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking) and
+[EXP-043](experiments/EXP-043-graph-lifetime-memory-reuse.md) (lifetimes, arena,
+production mode).
 
 ### Objective
 
@@ -1124,28 +1126,42 @@ Improve native INT8 performance without exceeding fidelity limits.
   quant 12.73 ms = 37.2 ms (20.4% of the 182.34 ms INT8 interval). GELU alone is a
   pointwise epilogue; the row-max quantizer needs a cross-tile reduction. Not
   implemented.
-- [ ] C07: Improve buffer lifetime and reuse - **prepared**: production arena and
-  diagnostic-write elimination. Declared chain 4.39 GB; production-graph live
-  bound 385.2 MB; 2.58 GB of diagnostic writes. Not implemented.
-- [ ] C08: Reduce dispatch and synchronization costs - dispatch count unchanged;
-  inter-dispatch gap 6.59 ms, so fusion (C06) is the main lever.
+- [x] C07: Improve buffer lifetime and reuse - **M15-A complete**: 516 transient
+  resources share one 437.4 MB placed heap; 153 persistent weight/input buffers
+  occupy 24.4 MB; 11 unbound placeholders are skipped. Production mode keeps only
+  the final dump (13 -> 1). DXGI local peak 4.67 -> 0.71 GB, chain load/alloc
+  6.02 -> 0.99 s, interleaved chain interval 187.59 -> 165.66 ms (diagnostic)
+  and 166.12 ms (production); against the M14 chain median of 182.34 ms the
+  saving is 9.0-9.2%. Of 180 never-read tensors (2.61 GB), 168 write-only
+  temporaries (2.57 GB) remain until a shader variant (EXP-043).
+- [x] C08: Reduce dispatch and synchronization costs - dispatch count unchanged
+  (234). Cold frame: 1028 transitions, 234 UAV and 234 aliasing barriers;
+  steady-state frame: 707 transitions. Production drops 11 transitions.
+  Inter-dispatch gap 0.41-2.70 ms. Fusion remains C06.
 - [ ] C09: Evaluate wave occupancy and register pressure - no occupancy counter
   available; parallelism improved without measuring occupancy.
 - [x] C10: Measure complete-frame improvements - ~7-9.5% INT8 GPU time reduction,
   bit-identical output (EXP-040). The quality-driven asymmetric encoding costs
   2.9% GPU time for +0.263 dB; it is a fidelity change, not an optimization
-  (EXP-041). M14 baseline: FP16 565.472 ms, INT8 207.463 ms by GPU interval
-  (2.726x), host preparation 7.03 s (EXP-042).
+  (EXP-041). M15-A adds 9-12% chain GPU time (9% vs the M14 median), 84% lower
+  local VRAM and 83% lower load/alloc with byte-identical tensors (EXP-043).
+  M14 baseline: FP16
+  565.472 ms, INT8 207.463 ms by GPU interval (2.726x), host preparation 7.03 s
+  (EXP-042).
 
 ### Validation Gate
 
 Optimizations provide reproducible end-to-end benefit without violating established correctness/fidelity limits; generated ISA and workload/measurement conditions are recorded.
 
-**PASS for the accepted change.** The 4-lane quantizer reproduces the accepted
-INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 383
+**PASS for the accepted changes.** The 4-lane quantizer reproduces the accepted
+INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 391
 tests green, and reduces end-to-end INT8 GPU time by ~7-9.5% in the A/B blocks.
-No other optimization is claimed. M15's next task is bounded to the two
-candidates above; implementation and measurement are pending.
+M15-A keeps every accepted FP16/INT8 frame hash, all 13 diagnostic tensors and
+the M09 finalizer (17/17) while cutting the chain's local VRAM 6.5x and its
+GPU interval by 9-12% in an interleaved comparison (8.4% for the full INT8
+frame; FP16 output and VRAM are unchanged). No other optimization is
+claimed. M15's next task is the MLP-up GELU + MLP-down quantization fusion
+selected in EXP-042; implementation and measurement are pending.
 
 ---
 
