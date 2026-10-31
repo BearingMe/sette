@@ -37,9 +37,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #ifdef M_TIMING
 #include "m_timing.h"
+#include "m_vram.h"
 #endif
 
 using Microsoft::WRL::ComPtr;
@@ -249,6 +251,7 @@ public:
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
             if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                             IID_PPV_ARGS(&device_)))) {
+                adapter_ = adapter;
                 std::wprintf(L"device: %s (vendor 0x%04x)\n", desc.Description, desc.VendorId);
                 break;
             }
@@ -285,14 +288,21 @@ public:
 #endif
     }
 
-    void Run(Fixture& f, const fs::path& outputDir, int seed = -1,
-             const std::string& timingPath = "") {
+    void Run(Fixture& f, const fs::path& outputDir, int seed,
+             const std::string& timingPath, const std::string& vramPath,
+             std::chrono::steady_clock::time_point processStart,
+             std::chrono::steady_clock::time_point parseDone) {
+        const auto t0 = std::chrono::steady_clock::now();
+#ifdef M_TIMING
+        if (!vramPath.empty())
+            vram_ = std::make_unique<vram::Tracker>(adapter_.Get());
+#endif
         const bool dec0Int8 = !f.dec0Weights.empty();
         const bool enc0Int8 = !f.enc0Weights.empty();
 #ifdef M_TIMING
         std::unique_ptr<timing::GpuTimer> timer;
         if (!timingPath.empty())
-            timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(), 32);
+            timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(), 34);
         timer_ = timer.get();
 #endif
         if (enc0Int8) {
@@ -359,6 +369,20 @@ public:
                 resources[i] = Upload(b.bytes, b.data.data());
             }
         }
+#ifdef M_TIMING
+        if (vram_) {
+            vram_->Add("params", params.size, "upload");
+            for (size_t i = 0; i < f.bindings.size(); ++i) {
+                const Binding& b = f.bindings[i];
+                vram_->Add(b.file.filename().string(), resources[i].size,
+                           b.input ? (b.kind == Kind::Buffer ? "upload" : "default")
+                                   : "default");
+                if (readback[i].size)
+                    vram_->Add("readback:" + b.file.filename().string(),
+                               readback[i].size, "readback");
+            }
+        }
+#endif
 
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), pipeline.Get()), "Reset(list)");
@@ -396,9 +420,29 @@ public:
                 sentinels.push_back(std::move(staging));
             }
         }
+#ifdef M_TIMING
+        if (timer) timer->BeginGlobal(list_.Get());
+#endif
         Prefix prefix;
         if (dec0Int8) prefix = Dec0Prefix(f, resources, params);
         if (enc0Int8) prefix = Enc0Prefix(f, resources, params, seed);
+#ifdef M_TIMING
+        if (vram_) {
+            for (size_t i = 0; i < prefix.buffers.size(); ++i)
+                vram_->Add("prefix-buffer-" + std::to_string(i), prefix.buffers[i].size,
+                           "mixed");
+            for (size_t i = 0; i < prefix.sentinels.size(); ++i)
+                vram_->Add("prefix-sentinel-" + std::to_string(i), prefix.sentinels[i].size,
+                           "upload");
+            for (size_t i = 0; i < prefix.readback.size(); ++i)
+                vram_->Add("prefix-readback-" + std::to_string(i), prefix.readback[i].size,
+                           "readback");
+        }
+#endif
+        const auto t1 = std::chrono::steady_clock::now();
+#ifdef M_TIMING
+        if (vram_) vram_->Sample("after_load");
+#endif
 
         D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -471,6 +515,9 @@ public:
             list_->ResourceBarrier(1, &barrier);
         }
         Issue("main", f.groups[0], f.groups[1], f.groups[2]);
+#ifdef M_TIMING
+        if (timer) timer->EndGlobal(list_.Get());
+#endif
 
         // ---- read back every output -------------------------------------
         for (size_t i = 0; i < f.bindings.size(); ++i) {
@@ -511,15 +558,18 @@ public:
         if (timer) timer->Resolve(list_.Get());
 #endif
         Check(list_->Close(), "Close(list)");
+        const auto t2 = std::chrono::steady_clock::now();
 
         ID3D12CommandList* lists[] = {list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
         Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
         WaitForSingleObject(event_, INFINITE);
+        const auto t3 = std::chrono::steady_clock::now();
 
 #ifdef M_TIMING
         if (timer) timer->Write(timingPath);
+        if (vram_) vram_->Sample("after_execute");
         timer_ = nullptr;
 #endif
 
@@ -570,6 +620,21 @@ public:
         std::printf("dispatch %ux%ux%u threads %ux%ux%u, %zu binding(s)\n", f.groups[0],
                     f.groups[1], f.groups[2], f.threads[0], f.threads[1], f.threads[2],
                     f.bindings.size());
+#ifdef M_TIMING
+        if (vram_) {
+            const auto t4 = std::chrono::steady_clock::now();
+            vram_->Sample("after_readback");
+            vram::HostPhases phases;
+            phases.startup_s = vram::Tracker::Seconds(processStart, parseDone);
+            phases.load_alloc_s = vram::Tracker::Seconds(t0, t1);
+            phases.record_s = vram::Tracker::Seconds(t1, t2);
+            phases.execute_wait_s = vram::Tracker::Seconds(t2, t3);
+            phases.readback_write_s = vram::Tracker::Seconds(t3, t4);
+            phases.total_s = vram::Tracker::Seconds(processStart, t4);
+            vram_->Host(phases);
+            vram_->Write(vramPath);
+        }
+#endif
     }
 
 private:
@@ -876,6 +941,9 @@ private:
         device_->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &rows, &rowBytes, &total);
         GpuBuffer staging = CommittedBuffer(total, D3D12_HEAP_TYPE_UPLOAD,
                                             D3D12_RESOURCE_STATE_GENERIC_READ, false);
+#ifdef M_TIMING
+        if (vram_) vram_->Transient(staging.size);
+#endif
         GpuBuffer texture = CommittedTexture(b, D3D12_RESOURCE_STATE_COPY_DEST);
         void* mapped = nullptr;
         Check(staging.resource->Map(0, nullptr, &mapped), "Map(texture staging)");
@@ -967,14 +1035,17 @@ private:
     ComPtr<ID3D12Fence> fence_;
     HANDLE event_ = nullptr;
     uint64_t fenceValue_ = 0;
+    ComPtr<IDXGIAdapter1> adapter_;
 #ifdef M_TIMING
     timing::GpuTimer* timer_ = nullptr;
+    std::unique_ptr<vram::Tracker> vram_;
 #endif
 };
 
 int Run(int argc, char** argv) {
+    const auto processStart = std::chrono::steady_clock::now();
     fs::path manifest, outputDir = ".", shaderDir;
-    std::string timingPath;
+    std::string timingPath, vramPath;
     int seed = -1;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -984,6 +1055,7 @@ int Run(int argc, char** argv) {
         else if (arg == "--seed" && i + 1 < argc) seed = std::stoi(argv[++i]);
 #ifdef M_TIMING
         else if (arg == "--timing" && i + 1 < argc) timingPath = argv[++i];
+        else if (arg == "--vram" && i + 1 < argc) vramPath = argv[++i];
 #endif
         else throw std::runtime_error("unknown option " + arg);
     }
@@ -993,8 +1065,9 @@ int Run(int argc, char** argv) {
         return 2;
     }
     Fixture fixture = Parse(manifest, shaderDir);
+    const auto parseDone = std::chrono::steady_clock::now();
     Runner runner;
-    runner.Run(fixture, outputDir, seed, timingPath);
+    runner.Run(fixture, outputDir, seed, timingPath, vramPath, processStart, parseDone);
     return 0;
 }
 

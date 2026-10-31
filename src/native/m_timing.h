@@ -47,7 +47,18 @@ public:
             throw std::runtime_error("GetTimestampFrequency");
     }
 
-    bool enabled() const { return count_ < capacity_; }
+    // One query pair is reserved for the whole-command-list interval.
+    bool enabled() const { return count_ + 1 < capacity_; }
+
+    void BeginGlobal(ID3D12GraphicsCommandList* list) {
+        list->EndQuery(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                       static_cast<UINT>(capacity_ * 2 - 2));
+    }
+
+    void EndGlobal(ID3D12GraphicsCommandList* list) {
+        list->EndQuery(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                       static_cast<UINT>(capacity_ * 2 - 1));
+    }
 
     void Begin(ID3D12GraphicsCommandList* list) {
         if (!enabled()) return;
@@ -67,6 +78,10 @@ public:
         if (count_ == 0) return;
         list->ResolveQueryData(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
                                static_cast<UINT>(count_ * 2), readback_.Get(), 0);
+        list->ResolveQueryData(heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                               static_cast<UINT>(capacity_ * 2 - 2), 2,
+                               readback_.Get(),
+                               static_cast<UINT64>(capacity_ * 2 - 2) * sizeof(uint64_t));
     }
 
     void Write(const std::string& path) {
@@ -89,7 +104,13 @@ public:
                 << "}";
             out << (i + 1 == count_ ? "\n" : ",\n");
         }
-        out << "  ]\n}\n";
+        const uint64_t gb = stamps[capacity_ * 2 - 2];
+        const uint64_t ge = stamps[capacity_ * 2 - 1];
+        out << "  ],\n  \"global\": {\"begin\": " << gb << ", \"end\": " << ge
+            << ", \"ticks\": " << (ge >= gb ? ge - gb : 0)
+            << ", \"ms\": " << (ge >= gb && frequency_
+                                    ? double(ge - gb) * 1000.0 / double(frequency_) : 0.0)
+            << "}\n}\n";
         readback_->Unmap(0, nullptr);
     }
 

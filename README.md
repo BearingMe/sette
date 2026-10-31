@@ -39,7 +39,9 @@ measured the static quantization alternatives: per-K-block weight scaling was
 rejected, and asymmetric activation encoding for the two non-negative operands
 is accepted as an opt-in configuration, raising the canonical frame to 44.4026 dB
 with 76/76 INT8 operators ([EXP-041](docs/experiments/EXP-041-quality-recovery.md));
-the 45 dB gate still fails. Performance and quality work continues in M14-M15.
+the 45 dB gate still fails. M14 now has a reproducible GPU-interval baseline,
+host-phase and VRAM measurements ([EXP-042](docs/experiments/EXP-042-performance-baseline.md));
+M15 is prepared but not implemented.
 
 ## Trace research workflow
 

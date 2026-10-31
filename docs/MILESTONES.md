@@ -38,7 +38,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M11 | Differential Error Mapping | COMPLETE | PASS |
 | M12 | Weight Quantization Refinement | COMPLETE | PASS |
 | M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
-| M14 | Performance Baseline | IN PROGRESS | PASS (bounded) |
+| M14 | Performance Baseline | COMPLETE (bounded C03) | PASS (bounded; C03 BLOCKED) |
 | M15 | RDNA 3 Optimization | IN PROGRESS | PASS (bounded) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
@@ -1037,10 +1037,12 @@ made.
 
 ## M14 — Performance Baseline
 
-**Status:** IN PROGRESS / PASS for the measured native comparison. The current
-mission's performance plan ("M12-A..E") maps here and to M15. See
+**Status:** COMPLETE (bounded C03) / **PASS (bounded); C03 BLOCKED**. The
+baseline now has a whole-command-list GPU interval, host-phase breakdown,
+allocation/VRAM measurements and a resource-lifetime bound. See
+[EXP-042](experiments/EXP-042-performance-baseline.md) (M14),
 [EXP-037](experiments/EXP-037-profiling-environment.md) (environment),
-[EXP-038](experiments/EXP-038-dispatch-profile.md) (per-dispatch timing),
+[EXP-038](experiments/EXP-038-dispatch-profile.md) (dispatch profile),
 [EXP-039](experiments/EXP-039-bottleneck-analysis.md) (bottlenecks) and the
 [performance finding](findings/2026-10-30-int8-performance.md).
 
@@ -1050,45 +1052,56 @@ Establish representative end-to-end performance measurements.
 
 ### Checkpoints
 
-- [x] C01: Define repeatable benchmarking conditions - D3D12 timestamp queries,
-  interleaved modes, warm-up, 5 repeats, frame-hash gate (EXP-037).
-- [x] C02: Measure conservative FP16 reference latency - 600.124 ms median,
-  585.4-610.6 ms range.
-- [ ] C03: Measure optimized FP16 reference latency - only the native FP16 path
-  exists; no separately optimized FP16 reference was built.
-- [x] C04: Measure INT8 inference latency - 205.167 ms median, 202.9-209.0 ms.
-- [x] C05: Separate kernel and dispatch overhead - bounded: per-dispatch
-  timestamps, but launch/barrier overhead cannot be isolated; 60 dispatches
-  below 0.1 ms total 2.5 ms.
-- [x] C06: Measure memory and conversion costs - declared traffic and the
-  quantization/pack families are measured; no DRAM counters.
-- [ ] C07: Record VRAM consumption - declared chain footprint is 680 buffers /
-  4.39 GB; peak resident VRAM was not measured.
-- [x] C08: Inspect workload-dependent bottlenecks - family/stage profile; scene
-  dependence was not swept.
+- [x] C01: Define repeatable benchmarking conditions - interleaved modes, one
+  warm-up, 3 repeats, frame-hash gate, 100 MHz timestamps, per-dispatch and
+  whole-command-list intervals, host phases (EXP-042).
+- [x] C02: Measure conservative FP16 reference latency - **565.472 ms** GPU
+  interval this session (564.35-566.22); 600.124 ms in EXP-038; 525-600 ms
+  observed across sessions.
+- [ ] C03: Measure optimized FP16 reference latency - **BLOCKED**: no comparable
+  optimized FP16 backend exists in the pinned references or the D3D12 harness.
+  d4r's native path is Linux/Vulkan/ROCm; quattro has FP16 WMMA microbenchmarks,
+  not the Preset M network. No new backend was built (EXP-042 §6).
+- [x] C04: Measure INT8 inference latency - **207.463 ms** GPU interval
+  (204.29-209.02), 202.429 ms dispatch sum.
+- [x] C05: Separate kernel and dispatch overhead - per-dispatch, whole-list,
+  submit/fence, record and host phases separated. INT8 interval 207.46 ms;
+  per-process submit/fence windows 229.79 ms; 22.3 ms outside the interval
+  (readbacks + submission/queue); 6.59 ms inter-dispatch gap. No mid-frame wait.
+- [x] C06: Measure memory and conversion costs - 5.066 GB tracked across all
+  heaps; 4.693 GB local peak; 151.7 MB readbacks for the B6 frame; a full
+  diagnostic dump adds 4.30 GB of readbacks. No DRAM counters.
+- [x] C07: Record VRAM consumption - **4.693 GB local peak**, 5.219 GB tracked
+  peak bound, 11.86 GB DXGI budget, largest allocation 139.9 MB. Chain declares
+  680 resources / 4.3896 GB; the production-graph aliasing bound is 385.2 MB.
+- [x] C08: Inspect workload-dependent bottlenecks - family/stage profile
+  unchanged (EXP-039/040); 9-frame content sweep in EXP-041; no new scene family.
 - [x] C09: Control warmup, synchronization, and GPU validation overhead - one
-  warm-up frame, one fence per process, timestamps inside the submission.
+  warm-up per mode, one fence per process, timestamps inside the submission,
+  readbacks after the measured interval.
 
 ### Validation Gate
 
 Baseline comparisons are reproducible and use equivalent workloads, stated measurement conditions, and clearly separated reference paths.
 
-**PASS for the bounded comparison.** Interleaved repeats of the same frame give
-600.124 ms (FP16) vs 205.167 ms (INT8), **2.93x**, with every frame hash equal to
-the accepted M09 output. Peak VRAM and an optimized FP16 reference remain open.
-[EXP-041](experiments/EXP-041-quality-recovery.md) adds an independent
-interleaved block for the quality configurations: full INT8 195.628 ms,
-full INT8 + asym 201.241 ms (+2.9%), `enc0` FP16 + asym 214.555 ms (+9.7%),
-attention FP16 + asym 266.434 ms (+36.2%). Those deltas are relative to that
-block's baseline, not to the EXP-038 absolute numbers.
+**PASS for the bounded baseline.** Interleaved repeats give **565.472 ms (FP16)
+vs 207.463 ms (INT8) by whole-command-list GPU interval, 2.726x**, with every
+frame hash equal to the accepted output. The dispatch-sum ratio is 2.788x; the
+earlier 2.93x was a dispatch-sum comparison in a different clock window
+(EXP-038). The five probe processes spend 7.03 s preparing the 207 ms INT8 frame
+(B6 wall 18.0 s), dominated by 5.53 s of chain resource creation/upload. Peak local VRAM is
+4.693 GB against an 11.86 GB budget; a production arena could reduce the chain
+live set from 4.39 GB to a 385 MB bound. **C03 remains BLOCKED** and is not
+claimed as measured. Quality is unchanged (45 dB FAIL).
 
 ---
 
 ## M15 — RDNA 3 Optimization
 
-**Status:** IN PROGRESS / PASS for one accepted optimization. The current
-mission's optimization step ("M12-D") maps here. See
-[EXP-040](experiments/EXP-040-optimization-results.md).
+**Status:** IN PROGRESS / PASS for one accepted optimization, **prepared** for
+the M14-selected candidates. See
+[EXP-040](experiments/EXP-040-optimization-results.md) (accepted quantizer) and
+[EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking).
 
 ### Objective
 
@@ -1096,9 +1109,9 @@ Improve native INT8 performance without exceeding fidelity limits.
 
 ### Checkpoints
 
-- [x] C01: Identify dominant execution bottlenecks - quantize/pack 28% of the
-  INT8 chain, MLP ~38%, attention ~24%; effective bandwidth 10-22 GB/s for the
-  large quantizers (EXP-039).
+- [x] C01: Identify dominant execution bottlenecks - quantize/pack 21.8% of the
+  INT8 chain after EXP-040, MLP ~38%, attention ~24%; effective bandwidth
+  10-22 GB/s for the large quantizers (EXP-039).
 - [ ] C02: Optimize WMMA tile selection - no WMMA remains in the full INT8 path;
   not applicable to the accepted graph.
 - [ ] C03: Compare DP4A alternatives - `dot4add_i8packed` is the executed path;
@@ -1106,25 +1119,33 @@ Improve native INT8 performance without exceeding fidelity limits.
 - [x] C04: Improve memory coalescing and LDS usage - four lanes per row with a
   groupshared max; contiguous whole-word writes per lane.
 - [ ] C05: Reduce redundant conversions - no conversion was removed.
-- [ ] C06: Investigate kernel fusion - quantize-into-GEMM fusion identified as
-  the highest-value next step; not implemented.
-- [ ] C07: Improve buffer lifetime and reuse - unchanged.
-- [ ] C08: Reduce dispatch and synchronization costs - dispatch count unchanged.
+- [ ] C06: Investigate kernel fusion - **prepared**: MLP-up epilogue GELU +
+  MLP-down quantization fusion selected. Measured cost GELU 24.44 ms + MLP-down
+  quant 12.73 ms = 37.2 ms (20.4% of the 182.34 ms INT8 interval). GELU alone is a
+  pointwise epilogue; the row-max quantizer needs a cross-tile reduction. Not
+  implemented.
+- [ ] C07: Improve buffer lifetime and reuse - **prepared**: production arena and
+  diagnostic-write elimination. Declared chain 4.39 GB; production-graph live
+  bound 385.2 MB; 2.58 GB of diagnostic writes. Not implemented.
+- [ ] C08: Reduce dispatch and synchronization costs - dispatch count unchanged;
+  inter-dispatch gap 6.59 ms, so fusion (C06) is the main lever.
 - [ ] C09: Evaluate wave occupancy and register pressure - no occupancy counter
   available; parallelism improved without measuring occupancy.
 - [x] C10: Measure complete-frame improvements - ~7-9.5% INT8 GPU time reduction,
   bit-identical output (EXP-040). The quality-driven asymmetric encoding costs
   2.9% GPU time for +0.263 dB; it is a fidelity change, not an optimization
-  (EXP-041).
+  (EXP-041). M14 baseline: FP16 565.472 ms, INT8 207.463 ms by GPU interval
+  (2.726x), host preparation 7.03 s (EXP-042).
 
 ### Validation Gate
 
 Optimizations provide reproducible end-to-end benefit without violating established correctness/fidelity limits; generated ISA and workload/measurement conditions are recorded.
 
 **PASS for the accepted change.** The 4-lane quantizer reproduces the accepted
-INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 365
+INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 383
 tests green, and reduces end-to-end INT8 GPU time by ~7-9.5% in the A/B blocks.
-No other optimization is claimed.
+No other optimization is claimed. M15's next task is bounded to the two
+candidates above; implementation and measurement are pending.
 
 ---
 

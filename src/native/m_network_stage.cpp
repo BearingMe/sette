@@ -44,9 +44,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #ifdef M_TIMING
 #include "m_timing.h"
+#include "m_vram.h"
 #endif
 
 using Microsoft::WRL::ComPtr;
@@ -216,6 +218,7 @@ public:
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
             if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                             IID_PPV_ARGS(&device_)))) {
+                adapter_ = adapter;
                 std::wprintf(L"device: %s (vendor 0x%04x)\n", desc.Description, desc.VendorId);
                 break;
             }
@@ -250,9 +253,20 @@ public:
     }
 
     void Run(Graph& g, const fs::path& outputDir, uint32_t seed,
-             const std::string& timingPath = "") {
+             const std::string& timingPath, const std::string& vramPath,
+             std::chrono::steady_clock::time_point processStart,
+             std::chrono::steady_clock::time_point parseDone) {
+        const auto t0 = std::chrono::steady_clock::now();
+#ifdef M_TIMING
+        if (!vramPath.empty())
+            vram_ = std::make_unique<vram::Tracker>(adapter_.Get());
+#endif
         for (Resource& r : g.resources) Create(r, seed);
         for (Stage& s : g.stages) Prepare(s, g);
+        const auto t1 = std::chrono::steady_clock::now();
+#ifdef M_TIMING
+        if (vram_) vram_->Sample("after_load");
+#endif
 
         Check(allocator_->Reset(), "Reset(allocator)");
         Check(list_->Reset(allocator_.Get(), nullptr), "Reset(list)");
@@ -261,9 +275,12 @@ public:
         std::unique_ptr<timing::GpuTimer> timer;
         if (!timingPath.empty())
             timer = std::make_unique<timing::GpuTimer>(device_.Get(), queue_.Get(),
-                                                       g.stages.size() + 1);
+                                                       g.stages.size() + 2);
 #endif
 
+#ifdef M_TIMING
+        if (timer) timer->BeginGlobal(list_.Get());
+#endif
         for (Stage& s : g.stages) {
             ID3D12DescriptorHeap* heaps[] = {s.heap.Get()};
             list_->SetDescriptorHeaps(1, heaps);
@@ -299,6 +316,9 @@ public:
 #endif
         }
 
+#ifdef M_TIMING
+        if (timer) timer->EndGlobal(list_.Get());
+#endif
         // readback of the requested ranges
         std::vector<ComPtr<ID3D12Resource>> readbacks;
         for (Dump& d : g.dumps) {
@@ -309,19 +329,26 @@ public:
             ComPtr<ID3D12Resource> readback = Readback(Align(d.bytes));
             list_->CopyBufferRegion(readback.Get(), 0, r.gpu.Get(), d.offset, d.bytes);
             readbacks.push_back(readback);
+#ifdef M_TIMING
+            if (vram_) vram_->Add("readback:" + d.file.string(), Align(d.bytes), "readback");
+#endif
         }
 #ifdef M_TIMING
         if (timer) timer->Resolve(list_.Get());
+        if (vram_) vram_->Sample("after_alloc");
 #endif
         Check(list_->Close(), "Close(list)");
+        const auto t2 = std::chrono::steady_clock::now();
         ID3D12CommandList* lists[] = {list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
         Check(queue_->Signal(fence_.Get(), ++fenceValue_), "Signal");
         Check(fence_->SetEventOnCompletion(fenceValue_, event_), "SetEventOnCompletion");
         WaitForSingleObject(event_, INFINITE);
+        const auto t3 = std::chrono::steady_clock::now();
 
 #ifdef M_TIMING
         if (timer) timer->Write(timingPath);
+        if (vram_) vram_->Sample("after_execute");
 #endif
 
         if (infoQueue_) {
@@ -351,6 +378,21 @@ public:
         }
         std::printf("graph: %zu stage(s), %zu resource(s)\n", g.stages.size(),
                     g.resources.size());
+#ifdef M_TIMING
+        if (vram_) {
+            const auto t4 = std::chrono::steady_clock::now();
+            vram_->Sample("after_readback");
+            vram::HostPhases phases;
+            phases.startup_s = vram::Tracker::Seconds(processStart, parseDone);
+            phases.load_alloc_s = vram::Tracker::Seconds(t0, t1);
+            phases.record_s = vram::Tracker::Seconds(t1, t2);
+            phases.execute_wait_s = vram::Tracker::Seconds(t2, t3);
+            phases.readback_write_s = vram::Tracker::Seconds(t3, t4);
+            phases.total_s = vram::Tracker::Seconds(processStart, t4);
+            vram_->Host(phases);
+            vram_->Write(vramPath);
+        }
+#endif
     }
 
 private:
@@ -392,6 +434,12 @@ private:
                                                 D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                IID_PPV_ARGS(&r.gpu)),
               "CreateCommittedResource");
+#ifdef M_TIMING
+        if (vram_) {
+            vram_->Add(r.name, r.bytes, "default");
+            vram_->Transient(r.bytes);
+        }
+#endif
         std::vector<uint8_t> init(static_cast<size_t>(r.bytes));
         if (!r.init.empty()) {
             init = ReadFile(fs::path(r.init));
@@ -556,11 +604,16 @@ private:
     HANDLE event_ = nullptr;
     uint64_t fenceValue_ = 0;
     std::map<ID3D12Resource*, D3D12_RESOURCE_STATES> states_;
+    ComPtr<IDXGIAdapter1> adapter_;
+#ifdef M_TIMING
+    std::unique_ptr<vram::Tracker> vram_;
+#endif
 };
 
 int Run(int argc, char** argv) {
+    const auto processStart = std::chrono::steady_clock::now();
     fs::path manifest, outputDir = ".", shaderDir;
-    std::string timingPath;
+    std::string timingPath, vramPath;
     uint32_t seed = 0;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -570,6 +623,7 @@ int Run(int argc, char** argv) {
         else if (arg == "--seed" && i + 1 < argc) seed = static_cast<uint32_t>(std::stoul(argv[++i]));
 #ifdef M_TIMING
         else if (arg == "--timing" && i + 1 < argc) timingPath = argv[++i];
+        else if (arg == "--vram" && i + 1 < argc) vramPath = argv[++i];
 #endif
         else throw std::runtime_error("unknown option " + arg);
     }
@@ -579,11 +633,12 @@ int Run(int argc, char** argv) {
         return 2;
     }
     Graph graph = Parse(manifest);
+    const auto parseDone = std::chrono::steady_clock::now();
     // shader paths that are just a file name resolve against --shaders
     for (Stage& s : graph.stages)
         if (!fs::exists(s.shader) && !shaderDir.empty()) s.shader = shaderDir / s.shader.filename();
     Runner runner;
-    runner.Run(graph, outputDir, seed, timingPath);
+    runner.Run(graph, outputDir, seed, timingPath, vramPath, processStart, parseDone);
     return 0;
 }
 

@@ -85,7 +85,7 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def run(probe, stage, out, shaders, seed=None, timing=None):
+def run(probe, stage, out, shaders, seed=None, timing=None, vram=None):
     if Path(out).is_dir():
         shutil.rmtree(out)
     command = [str(probe), '--fixture', str(stage), '--out', str(out), '--shaders', str(shaders)]
@@ -93,6 +93,8 @@ def run(probe, stage, out, shaders, seed=None, timing=None):
         command += ['--seed', str(seed)]
     if timing is not None:
         command += ['--timing', str(timing)]
+    if vram is not None:
+        command += ['--vram', str(vram)]
     done = subprocess.run(command, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f'{stage}: {done.stdout[-600:]}{done.stderr[-600:]}')
@@ -153,11 +155,13 @@ def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None,
     return info
 
 
-def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None):
+def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None, vram=None):
     command = [str(network_probe), '--graph', str(chain_dir / 'graph.txt'),
                '--out', str(out), '--shaders', str(shaders), '--seed', str(seed)]
     if timing is not None:
         command += ['--timing', str(timing)]
+    if vram is not None:
+        command += ['--vram', str(vram)]
     done = subprocess.run(command, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f'chain: {done.stdout[-600:]}{done.stderr[-600:]}')
@@ -165,7 +169,8 @@ def run_chain(network_probe, chain_dir, out, shaders, seed=0, timing=None):
     return Path(out) / 'out-dec1.bin'
 
 
-def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None, timing_dir=None):
+def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None, timing_dir=None,
+                 vram_dir=None):
     """dec0 -> post -> downsample, with the neural chain's dec1 as dec0's tokens."""
     dec0 = clone_fixture('dec0', out / f'dec0-{tag}')
     shutil.copyfile(dec1, dec0 / 'in-tokens.bin')
@@ -173,18 +178,21 @@ def image_stages(dec1, tag, out, probe, shaders, dec0_mode='fp16', seed=None, ti
         import m_stage_fixture as sf
         sf.prepare_dec0_mode(dec0, dec0_mode)
     res0 = run(probe, dec0 / 'stage.txt', dec0 / 'results', shaders, seed=seed,
-               timing=(timing_dir / f'dec0-{tag}.json') if timing_dir else None)
+               timing=(timing_dir / f'dec0-{tag}.json') if timing_dir else None,
+               vram=(vram_dir / f'dec0-{tag}.json') if vram_dir else None)
 
     post = clone_fixture('post', out / f'post-{tag}')
     for role in ('gate', 'mix', 'cov'):
         shutil.copyfile(res0 / f'out-{role}.bin', post / f'in-{role}.bin')
     res1 = run(probe, post / 'stage.txt', post / 'results', shaders,
-               timing=(timing_dir / f'post-{tag}.json') if timing_dir else None)
+               timing=(timing_dir / f'post-{tag}.json') if timing_dir else None,
+               vram=(vram_dir / f'post-{tag}.json') if vram_dir else None)
 
     down = clone_fixture('downsample', out / f'downsample-{tag}')
     shutil.copyfile(res1 / 'out-packed.bin', down / 'in-src.bin')
     res2 = run(probe, down / 'stage.txt', down / 'results', shaders,
-               timing=(timing_dir / f'downsample-{tag}.json') if timing_dir else None)
+               timing=(timing_dir / f'downsample-{tag}.json') if timing_dir else None,
+               vram=(vram_dir / f'downsample-{tag}.json') if vram_dir else None)
     return {'frame': res2 / 'out-out.bin',
             'stages': {'dec0': {'fixture': dec0, 'results': res0},
                        'post': {'fixture': post, 'results': res1},
@@ -541,6 +549,8 @@ def main():
     ap.add_argument('--previous-frame', type=Path, help='previous accepted cumulative raw frame')
     ap.add_argument('--timing-dir', type=Path, default=None,
                     help='ask each probe for D3D12 GPU timestamps (requires the *_timed binaries)')
+    ap.add_argument('--vram-dir', type=Path, default=None,
+                    help='ask each probe for allocation/VRAM and host-phase JSON (requires the *_timed binaries)')
     a = ap.parse_args()
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.cumulative_mode == 'none' and a.cumulative_layers:
@@ -585,6 +595,8 @@ def main():
     a.out.mkdir(parents=True, exist_ok=a.reuse)
     if a.timing_dir:
         a.timing_dir.mkdir(parents=True, exist_ok=True)
+    if a.vram_dir:
+        a.vram_dir.mkdir(parents=True, exist_ok=True)
     manifest = input_manifest(a)
     if a.q_mode == 'int8-q' and a.enc1_int8 is None:
         raise SystemExit('--q-mode int8-q needs --enc1-int8')
@@ -615,7 +627,8 @@ def main():
                 complete.prepare_enc0(enc0_fixture)
         enc0 = run(a.probe, enc0_fixture / 'stage.txt', a.out / f'enc0-{tag}',
                    a.shaders, seed=(1 if tag=='repeat' else 0) if a.enc0_mode!='fp16' else None,
-                   timing=(a.timing_dir / f'enc0-{tag}.json') if a.timing_dir else None)
+                   timing=(a.timing_dir / f'enc0-{tag}.json') if a.timing_dir else None,
+                   vram=(a.vram_dir / f'enc0-{tag}.json') if a.vram_dir else None)
         tokens = enc0 / 'out-tokens.bin'
         chain_dir = a.out / f'chain-{tag}'
         build_chain(a.cumulative_layers or LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
@@ -623,11 +636,12 @@ def main():
                     mlp_mode=a.mlp_mode)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                           a.shaders, seed=1 if tag == 'repeat' and (a.mlp_mode != 'fp16' or a.cumulative_mode != 'none') else 0,
-                          timing=(a.timing_dir / f'chain-{tag}.json') if a.timing_dir else None)
+                          timing=(a.timing_dir / f'chain-{tag}.json') if a.timing_dir else None,
+                          vram=(a.vram_dir / f'chain-{tag}.json') if a.vram_dir else None)
         stages = image_stages(dec1, tag, a.out, a.probe, a.shaders,
                               dec0_mode=a.dec0_mode,
                               seed=(1 if tag == 'repeat' else 0) if a.dec0_mode != 'fp16' else None,
-                              timing_dir=a.timing_dir)
+                              timing_dir=a.timing_dir, vram_dir=a.vram_dir)
         full = {'enc0': {'fixture': enc0_fixture, 'results': enc0},
                 'chain': {'file': dec1}, **stages['stages']}
         hashes = boundary_hashes(full)
