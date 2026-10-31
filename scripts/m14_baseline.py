@@ -50,7 +50,8 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def run_mode(mode, out, layers, network_mode='diagnostic', network_arena=False):
+def run_mode(mode, out, layers, network_mode='diagnostic', network_arena=False,
+             fuse_mlp=False):
     timing = out / 'timing'
     vram = out / 'vram'
     command = [sys.executable, str(HERE / 'm_b6_frame.py'), '--out', str(out),
@@ -59,6 +60,8 @@ def run_mode(mode, out, layers, network_mode='diagnostic', network_arena=False):
                '--network-probe', str(REPO / 'build/native/Release/m_network_stage_timed.exe'),
                '--timing-dir', str(timing), '--vram-dir', str(vram),
                '--network-mode', network_mode, *MODES[mode]]
+    if fuse_mlp and mode != 'fp16':
+        command.append('--fuse-mlp')
     if network_arena:
         # The arena pays off on the INT8 chain's 4.39 GB working set. The FP16
         # chain is ~0.76 GB and the extra aliasing barriers cost ~1%, so the
@@ -153,6 +156,7 @@ def main():
     ap.add_argument('--network-mode', choices=['diagnostic', 'production'],
                     default='diagnostic')
     ap.add_argument('--network-arena', action='store_true')
+    ap.add_argument('--fuse-mlp', action='store_true')
     a = ap.parse_args()
     if a.out.exists():
         raise SystemExit(f'{a.out} exists; use a fresh directory')
@@ -160,16 +164,17 @@ def main():
     report = {'repeats': a.repeats, 'warmup': a.warmup,
               'layers': str(a.cumulative_layers), 'accepted': ACCEPTED,
               'network_mode': a.network_mode, 'network_arena': a.network_arena,
+              'fuse_mlp': a.fuse_mlp,
               'runs': {}, 'comparison': {}, 'status': 'running'}
     for mode in ('fp16', 'int8'):
         for warm in range(a.warmup):
             run_mode(mode, a.out / mode / f'warm-{warm:02d}', a.cumulative_layers,
-                     a.network_mode, a.network_arena)
+                     a.network_mode, a.network_arena, a.fuse_mlp)
             print(f'{mode} warmup {warm} done', flush=True)
     for repeat in range(a.repeats):
         for mode in ('fp16', 'int8'):
             row = run_mode(mode, a.out / mode / f'run-{repeat:02d}', a.cumulative_layers,
-                           a.network_mode, a.network_arena)
+                           a.network_mode, a.network_arena, a.fuse_mlp)
             report['runs'].setdefault(mode, []).append({
                 'repeat': repeat, 'wall_seconds': row['wall_seconds'],
                 'frame_sha256': row['frame_sha256'],

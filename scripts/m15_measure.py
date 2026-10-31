@@ -105,6 +105,8 @@ def main():
                     default=REPO / 'build/native/Release/m_network_stage_timed.exe')
     ap.add_argument('--shaders', type=Path, default=REPO / 'build/native')
     ap.add_argument('--repeats', type=int, default=3)
+    ap.add_argument('--fuse-mlp', action='store_true',
+                    help='fuse the post-MLP GELU with the down-projection quantizer')
     ap.add_argument('--m14', type=Path,
                     default=TEMP / 'm14-baseline-20261030' / 'm14-baseline.json')
     a = ap.parse_args()
@@ -117,13 +119,14 @@ def main():
         if not a.enc1_input:
             raise SystemExit('--build-from-layers also needs --enc1-input')
         graph_dir = a.graph_dir or (a.out / 'chain')
-        b6.build_chain(a.build_from_layers, graph_dir, a.enc1_input)
+        b6.build_chain(a.build_from_layers, graph_dir, a.enc1_input,
+                       fuse_mlp=a.fuse_mlp)
         graph = graph_dir / 'graph.txt'
     if graph is None:
         raise SystemExit('--graph or --build-from-layers is required')
 
     report = {'graph': str(graph), 'repeats': a.repeats, 'accepted_chain': ACCEPTED_CHAIN,
-              'configs': CONFIGS, 'runs': {}, 'status': 'running'}
+              'fuse_mlp': a.fuse_mlp, 'configs': CONFIGS, 'runs': {}, 'status': 'running'}
     # warm-up once per configuration, then interleave the measured rounds
     for name, cfg in CONFIGS.items():
         run(a.probe, graph, a.out / name / 'warm', cfg, a.shaders)

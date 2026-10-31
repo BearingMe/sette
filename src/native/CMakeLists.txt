@@ -63,6 +63,7 @@ set(SHADERS64
     "swin_attention_q8_cs.hlsl|PV|swin_attention_pv.cso"
     "swin_mlp_down_q8_cs.hlsl|Down|swin_mlp_down_q8.cso"
     "swin_mlp_up_q8_cs.hlsl|Up|swin_mlp_up_q8.cso"
+    "swin_mlp_gelu_quant_cs.hlsl|GeluQuant|swin_mlp_gelu_quant.cso"
     "dec0_q8_layout_cs.hlsl|Quantize|dec0_q8_quant.cso"
     "dec0_q8_layout_cs.hlsl|FP16|dec0_expansion_f16.cso"
     "dec0_q8_matmul_cs.hlsl|main|dec0_q8_matmul.cso"

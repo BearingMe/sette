@@ -136,11 +136,12 @@ def declared_outputs(stage_txt):
 
 
 def build_chain(layers, out, enc1_input, q_int8=False, enc1_int8=None,
-                mlp_int8=False, enc1_mlp=None, mlp_mode=None):
+                mlp_int8=False, enc1_mlp=None, mlp_mode=None, fuse_mlp=False):
     sys.path.insert(0, str(HERE))
     import m_layer_suite as suite
     info = suite.build_chain(str(layers), str(out), q_int8=q_int8, enc1_int8=enc1_int8,
-                             mlp_int8=mlp_int8, enc1_mlp=enc1_mlp, mlp_mode=mlp_mode)
+                             mlp_int8=mlp_int8, enc1_mlp=enc1_mlp, mlp_mode=mlp_mode,
+                             fuse_mlp=fuse_mlp)
     graph = out / 'graph.txt'
     lines = graph.read_text().splitlines()
     replaced = False
@@ -560,6 +561,8 @@ def main():
                     help='neural graph mode: all dumps, or only the final tensor')
     ap.add_argument('--network-arena', action='store_true',
                     help='reuse transient neural buffers from a bounded placed-resource arena')
+    ap.add_argument('--fuse-mlp', action='store_true',
+                    help='fuse the post-MLP GELU with the down-projection quantizer')
     a = ap.parse_args()
     validate_precision_modes(a.q_mode, a.dec0_mode, a.mlp_mode)
     if a.cumulative_mode == 'none' and a.cumulative_layers:
@@ -642,7 +645,7 @@ def main():
         chain_dir = a.out / f'chain-{tag}'
         build_chain(a.cumulative_layers or LAYERS, chain_dir, tokens, q_int8=a.q_mode == 'int8-q',
                     enc1_int8=a.enc1_int8, mlp_int8=a.mlp_mode != 'fp16', enc1_mlp=a.enc1_mlp,
-                    mlp_mode=a.mlp_mode)
+                    mlp_mode=a.mlp_mode, fuse_mlp=a.fuse_mlp)
         dec1 = run_chain(a.network_probe, chain_dir, a.out / f'chain-{tag}-results',
                           a.shaders, seed=1 if tag == 'repeat' and (a.mlp_mode != 'fp16' or a.cumulative_mode != 'none') else 0,
                           timing=(a.timing_dir / f'chain-{tag}.json') if a.timing_dir else None,

@@ -39,7 +39,7 @@ A milestone is `COMPLETE` only when its gate is `PASS`. Validation evidence and 
 | M12 | Weight Quantization Refinement | COMPLETE | PASS |
 | M13 | Activation and Temporal Refinement | IN PROGRESS (static) | PASS (static) / BLOCKED (temporal) |
 | M14 | Performance Baseline | COMPLETE (bounded C03) | PASS (bounded; C03 BLOCKED) |
-| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (two accepted: quantizer, memory reuse) |
+| M15 | RDNA 3 Optimization | IN PROGRESS | PASS (three accepted: quantizer, memory reuse, MLP fusion) |
 | M16 | Final Quality Gate | NOT STARTED | PENDING |
 
 Phase II: M06-M08 pass. M05 is capture-complete for buffers and images and its
@@ -1098,12 +1098,14 @@ claimed as measured. Quality is unchanged (45 dB FAIL).
 
 ## M15 — RDNA 3 Optimization
 
-**Status:** IN PROGRESS / PASS for two accepted optimizations: the 4-lane
-quantizer and production graph memory reuse. See
+**Status:** IN PROGRESS / PASS for three accepted optimizations: the 4-lane
+quantizer, production graph memory reuse, and the fused post-MLP
+GELU/down-quantizer. See
 [EXP-040](experiments/EXP-040-optimization-results.md) (accepted quantizer),
-[EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking) and
+[EXP-042](experiments/EXP-042-performance-baseline.md) (baseline and ranking),
 [EXP-043](experiments/EXP-043-graph-lifetime-memory-reuse.md) (lifetimes, arena,
-production mode).
+production mode) and
+[EXP-044](experiments/EXP-044-mlp-gelu-quantizer-fusion.md) (B1-B6 fusion).
 
 ### Objective
 
@@ -1121,11 +1123,16 @@ Improve native INT8 performance without exceeding fidelity limits.
 - [x] C04: Improve memory coalescing and LDS usage - four lanes per row with a
   groupshared max; contiguous whole-word writes per lane.
 - [ ] C05: Reduce redundant conversions - no conversion was removed.
-- [ ] C06: Investigate kernel fusion - **prepared**: MLP-up epilogue GELU +
-  MLP-down quantization fusion selected. Measured cost GELU 24.44 ms + MLP-down
-  quant 12.73 ms = 37.2 ms (20.4% of the 182.34 ms INT8 interval). GELU alone is a
-  pointwise epilogue; the row-max quantizer needs a cross-tile reduction. Not
-  implemented.
+- [x] C06: Investigate kernel fusion - **M15-B complete**: the post-MLP GELU and
+  the down-projection quantizer now share one dispatch. The accepted four-lane
+  per-token row reduction is preserved; GELU is materialized once, then the code
+  pass reads the same thread's chunk. Ten pairs become ten fused stages: chain
+  dispatches 234 -> 224 and full-frame 243 -> 233. Interleaved chain interval
+  169.47 -> 145.93 ms (-23.54 ms, 13.9%); full frame 195.46 -> 175.92 ms
+  (-19.54 ms, 11.1%). All 13 diagnostic tensors and the accepted frame/chain
+  hashes are byte-identical (EXP-044). MLP-up/GELU/down fusion that would move
+  the row reduction into the MLP-up threadgroup was rejected because N=384 maps
+  one token across two groups.
 - [x] C07: Improve buffer lifetime and reuse - **M15-A complete**: 516 transient
   resources share one 437.4 MB placed heap; 153 persistent weight/input buffers
   occupy 24.4 MB; 11 unbound placeholders are skipped. Production mode keeps only
@@ -1134,10 +1141,13 @@ Improve native INT8 performance without exceeding fidelity limits.
   and 166.12 ms (production); against the M14 chain median of 182.34 ms the
   saving is 9.0-9.2%. Of 180 never-read tensors (2.61 GB), 168 write-only
   temporaries (2.57 GB) remain until a shader variant (EXP-043).
-- [x] C08: Reduce dispatch and synchronization costs - dispatch count unchanged
-  (234). Cold frame: 1028 transitions, 234 UAV and 234 aliasing barriers;
-  steady-state frame: 707 transitions. Production drops 11 transitions.
-  Inter-dispatch gap 0.41-2.70 ms. Fusion remains C06.
+- [x] C08: Reduce dispatch and synchronization costs - M15-A left the dispatch
+  count at 234; M15-B removes ten dispatch pairs and adds ten fused stages, so
+  the chain is 224 dispatches and the full frame 233. Production barriers fall
+  with the stage count: transitions 1017 -> 1007, UAV 234 -> 224 and aliasing
+  234 -> 224. M15-A's cold/steady-state transition measurements (1028 / 707)
+  and 0.41-2.70 ms inter-dispatch gap remain the reference for the unfused
+  graph.
 - [ ] C09: Evaluate wave occupancy and register pressure - no occupancy counter
   available; parallelism improved without measuring occupancy.
 - [x] C10: Measure complete-frame improvements - ~7-9.5% INT8 GPU time reduction,
@@ -1147,21 +1157,29 @@ Improve native INT8 performance without exceeding fidelity limits.
   local VRAM and 83% lower load/alloc with byte-identical tensors (EXP-043).
   M14 baseline: FP16
   565.472 ms, INT8 207.463 ms by GPU interval (2.726x), host preparation 7.03 s
-  (EXP-042).
+  (EXP-042). M15-B adds a 19.54 ms full-frame saving (11.1%) and a 23.54 ms
+  chain saving (13.9%) against the same-session control, with the accepted
+  hashes and 714.8 MB local peak unchanged; the fused stage replaces 42.12 ms
+  of GELU+quantizer time with 24.74 ms (EXP-044).
 
 ### Validation Gate
 
 Optimizations provide reproducible end-to-end benefit without violating established correctness/fidelity limits; generated ISA and workload/measurement conditions are recorded.
 
 **PASS for the accepted changes.** The 4-lane quantizer reproduces the accepted
-INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 391
+INT8 frame, passes the enc0 all-element and attention-pair checks, keeps 395
 tests green, and reduces end-to-end INT8 GPU time by ~7-9.5% in the A/B blocks.
 M15-A keeps every accepted FP16/INT8 frame hash, all 13 diagnostic tensors and
 the M09 finalizer (17/17) while cutting the chain's local VRAM 6.5x and its
 GPU interval by 9-12% in an interleaved comparison (8.4% for the full INT8
-frame; FP16 output and VRAM are unchanged). No other optimization is
-claimed. M15's next task is the MLP-up GELU + MLP-down quantization fusion
-selected in EXP-042; implementation and measurement are pending.
+frame; FP16 output and VRAM are unchanged). M15-B fuses the post-MLP GELU with
+the down-projection quantizer: the same hashes, all 13 diagnostic tensors, the
+M09 finalizer (17/17, now on a fused diagnostic frame), 76/76 coverage and zero
+D3D12 messages survive a 13.9% chain / 11.1% full-frame interval reduction
+against a same-session control, with the arena and 714.8 MB local peak
+unchanged. No quality, temporal, proxy or DLL work is claimed. M15's next task
+is M15-C: persistent in-process execution with changing inputs and
+external-resource readiness.
 
 ---
 

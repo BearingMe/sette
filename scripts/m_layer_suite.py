@@ -176,8 +176,59 @@ def validate_mlp_stages(stages, mode):
         raise SystemExit('unexpected MLP stage sequence or matrix shader fallback')
 
 
+def fuse_mlp_stages(stages, shader='swin_mlp_gelu_quant.cso', layers=None):
+    """Replace each (GELU, down-quantizer) pair with one fused dispatch.
+
+    The row maximum is still reduced by the quantizer's four lanes inside one
+    threadgroup, so no token crosses a threadgroup boundary.  The fused stage
+    reads the MLP-up f16 output and writes the GELU diagnostic tensor plus the
+    down-projection codes and scales; the GELU and quantizer stages disappear.
+    """
+    def line(stage, key, reg=None):
+        found = [w for w in stage['lines'] if w and w[0] == key
+                 and (reg is None or w[1] == str(reg))]
+        if len(found) != 1:
+            raise SystemExit(f'{stage["name"]}: expected one {key} line'
+                             + (f' for register {reg}' if reg is not None else ''))
+        return found[0]
+
+    fused, count, index = [], 0, 0
+    while index < len(stages):
+        stage = stages[index]
+        if not stage['name'].endswith('.mlp-gelu'):
+            fused.append(stage)
+            index += 1
+            continue
+        prefix = stage['name'][:-len('.mlp-gelu')]
+        if layers is not None and prefix not in layers:
+            fused.append(stage)
+            index += 1
+            continue
+        if index + 1 >= len(stages) or not stages[index + 1]['name'].endswith(
+                '.mlp-down-quant'):
+            raise SystemExit(f'{stage["name"]}: no following down-quantizer')
+        gelu, quant = stage, stages[index + 1]
+        z = line(gelu, 'srv', 0)[2]
+        g = line(gelu, 'uav', 0)[2]
+        if line(quant, 'srv', 0)[2] != g:
+            raise SystemExit(f'{quant["name"]}: does not consume {g}')
+        codes, scales = line(quant, 'uav', 0)[2], line(quant, 'uav', 1)[2]
+        params = line(quant, 'params')
+        groups = line(quant, 'groups')
+        fused.append({'name': prefix + '.mlp-fused', 'lines': [
+            ['shader', shader], ['threads', '256', '1', '1'], groups, params,
+            ['srv', '0', z], ['uav', '0', g], ['uav', '1', codes],
+            ['uav', '2', scales]]})
+        count += 1
+        index += 2
+    if count == 0:
+        raise SystemExit('chain has no MLP GELU/quantizer pair to fuse')
+    return fused, count
+
+
 def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, enc1_mlp=None,
-                mlp_mode=None, cumulative_diagnostics=False):
+                mlp_mode=None, cumulative_diagnostics=False, fuse_mlp=False,
+                fuse_mlp_layers=None):
     """Concatenate the ten layer graphs, remapping every produced field.
 
     A resource `<layer>_<name>` is local to that layer, except the fields named
@@ -292,6 +343,9 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
     final = produced['dec1.out']
     if mlp_int8:
         validate_mlp_stages(stages, selected_mlp_mode)
+    fused_mlp = 0
+    if fuse_mlp:
+        stages, fused_mlp = fuse_mlp_stages(stages, layers=fuse_mlp_layers)
     lines = ['version 1']
     for r in resources:
         lines.append(f'resource {r["name"]} {r["bytes"]}' +
@@ -316,14 +370,17 @@ def build_chain(directory, out, q_int8=False, enc1_int8=None, mlp_int8=False, en
         words[1] = cumulative_aliases.get(words[1], words[1])
         lines.append(' '.join(words))
     open(os.path.join(out, 'graph.txt'), 'w').write('\n'.join(lines) + '\n')
-    print(f'chain: {len(stages)} dispatches, {len(resources)} resources -> {out}')
+    print(f'chain: {len(stages)} dispatches, {len(resources)} resources'
+          + (f', {fused_mlp} fused MLP stage(s)' if fused_mlp else '') + f' -> {out}')
     return {'stages': len(stages), 'resources': len(resources),
-            'final': final, 'bytes': bytes_}
+            'final': final, 'bytes': bytes_, 'fused_mlp': fused_mlp}
 
 
-def run_chain(directory, probe, shaders, json_out, q_int8=False, enc1_int8=None):
+def run_chain(directory, probe, shaders, json_out, q_int8=False, enc1_int8=None,
+              fuse_mlp=False):
     out = os.path.join(directory, 'chain-int8q' if q_int8 else 'chain')
-    info = build_chain(directory, out, q_int8=q_int8, enc1_int8=enc1_int8)
+    info = build_chain(directory, out, q_int8=q_int8, enc1_int8=enc1_int8,
+                       fuse_mlp=fuse_mlp)
     results = os.path.join(out, 'results')
     lf.run(out, probe, shaders, 0, results)
     again = os.path.join(out, 'results-repeat')
@@ -382,6 +439,8 @@ def main():
     h.add_argument('--q-mode', choices=['fp16', 'int8-q'], default='fp16')
     h.add_argument('--enc1-int8', default=None,
                    help='enc1 fixture with the INT8 Q projection (int8-q mode)')
+    h.add_argument('--fuse-mlp', action='store_true',
+                   help='fuse the post-MLP GELU with the down-projection quantizer')
     a = ap.parse_args()
     if a.command == 'export':
         return export_all(a.capture, a.out)
@@ -391,8 +450,10 @@ def main():
         return check_all(a.directory, a.probe, a.shaders, a.json)
     if a.q_mode == 'int8-q':
         return run_chain(a.directory, a.probe, a.shaders, a.json,
-                         q_int8=True, enc1_int8=a.enc1_int8)
-    return run_chain(a.directory, a.probe, a.shaders, a.json)
+                         q_int8=True, enc1_int8=a.enc1_int8,
+                         fuse_mlp=a.fuse_mlp)
+    return run_chain(a.directory, a.probe, a.shaders, a.json,
+                     fuse_mlp=a.fuse_mlp)
 
 
 if __name__ == '__main__':

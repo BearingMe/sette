@@ -307,8 +307,11 @@ def finalize_complete(chain,frame,isa_dir,out):
         _,stages,_=cu.up.suite._parse_graph(path)
         shaders=[Path(w[1]).name for s in stages for w in s['lines'] if w[0]=='shader']
         if any(n in shaders for n in ['swin_attention.cso','swin_matmul.cso','swin_merge.cso','swin_mlp.cso']):return False
-        return (len(stages)==234 and shaders.count('swin_attention_qk.cso')==10 and shaders.count('swin_attention_pv.cso')==10
+        common=(shaders.count('swin_attention_qk.cso')==10 and shaders.count('swin_attention_pv.cso')==10
                 and shaders.count('swin_mlp_up_q8.cso')==34 and shaders.count('swin_mlp_down_q8.cso')==20)
+        accepted=len(stages)==234 and shaders.count('swin_mlp_gelu.cso')==10 and shaders.count('swin_q8_quant.cso')==84
+        fused=len(stages)==224 and shaders.count('swin_mlp_gelu_quant.cso')==10 and shaders.count('swin_mlp_gelu.cso')==0 and shaders.count('swin_q8_quant.cso')==74
+        return common and (accepted or fused)
     fields={}
     for path in (frame/'chain-native-results').glob('out-*.bin'):
         raw=np.fromfile(path,np.uint8)

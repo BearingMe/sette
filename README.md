@@ -42,7 +42,10 @@ with 76/76 INT8 operators ([EXP-041](docs/experiments/EXP-041-quality-recovery.m
 the 45 dB gate still fails. M14 now has a reproducible GPU-interval baseline,
 host-phase and VRAM measurements ([EXP-042](docs/experiments/EXP-042-performance-baseline.md));
 M15-A adds a production/diagnostic graph split and a bounded placed-resource
-arena with byte-identical outputs ([EXP-043](docs/experiments/EXP-043-graph-lifetime-memory-reuse.md)).
+arena with byte-identical outputs ([EXP-043](docs/experiments/EXP-043-graph-lifetime-memory-reuse.md));
+M15-B fuses the post-MLP GELU with the down-projection quantizer, cutting the
+INT8 chain interval by 13.9% and the full frame by 11.1% without changing any
+accepted hash or diagnostic tensor ([EXP-044](docs/experiments/EXP-044-mlp-gelu-quantizer-fusion.md)).
 
 ## Trace research workflow
 
